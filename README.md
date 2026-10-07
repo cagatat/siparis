@@ -1,21 +1,21 @@
 # Esse Jeffe Otomasyon
 
-Şu an çalışan modül: **Sipariş paneli.**
+Panel üç aşamadan oluşur:
 
-**Yeni siparişler sekmesi**
-1. "Siparişleri getir" → kargoya verilmemiş ve henüz etiketlenmemiş siparişler tabloda görünür.
-   Her satır bir sipariş; SKU'lar alt alta yazılır, siparişten çıkarılmış ya da değiştirilmiş
-   ürünler listelenmez. En sağdaki "Etiketler" kolonunda siparişe yazdığınız etiketler/notlar görünür.
-2. Listeye girmesini istemediğiniz siparişlerin işaretini kaldırın (hepsi seçili gelir).
-3. "Excel oluştur" → seçilenler Google Sheet'e yeni bir sekme olarak yazılır, Excel olarak
-   panelden indirilebilir, e-postanıza (Sheet linki + Excel eki) gönderilir ve Shopify'da
-   `etiketi çıkarıldı - otomatik` etiketi eklenir. Etiketli siparişler bir daha bu sekmede çıkmaz.
+| Aşama | Ne var | Buton | Butonun yaptığı |
+|---|---|---|---|
+| 1 · Yeni gelen siparişler | Hiç dokunulmamış siparişler | **Panele çek** | Shopify: `etiket oluşturuldu - otomatik` etiketi · Trendyol: "İşleme Alındı" · Hepsiburada: paketlenip "Gönderime Hazır" |
+| 2 · Panele çekilenler | 1. aşamadan çekilenler | **Drive'a aktar** | Google Sheet'e yeni sekme olarak yazar, e-posta gönderir · Shopify: `drive'a aktarıldı - otomatik` etiketi · Trendyol/Hepsiburada: sistem kaydına alınır |
+| 3 · Etiket oluşturulanlar | Drive'a aktarılanlar (tarih aralığıyla) | **Excel indir** | Hiçbir şeyi değiştirmez |
 
-**Geçmiş (etiketlenmiş) sekmesi**
-Tarih aralığı seçip daha önce etiketlenmiş siparişleri görebilir, seçtiklerinizi tekrar
-listeye alabilirsiniz. Bu sekme etiketlere dokunmaz.
+Her sekmede siparişler tek satırdır; SKU'lar alt alta yazılır, siparişten çıkarılmış ya da
+değiştirilmiş ürünler listelenmez. Adres ve Shopify etiketleri (notlarınız) da görünür.
+Her sekmede "Excel indir" ile seçilenleri durum değiştirmeden Excel olarak alabilirsiniz.
 
-Bir siparişin tekrar "Yeni siparişler"e düşmesini isterseniz Shopify'da etiketini silmeniz yeterli.
+Önceki sürümde `etiketi çıkarıldı - otomatik` etiketi almış siparişler 3. aşamada görünür.
+
+Trendyol ve Hepsiburada'daki durum değişiklikleri geri alınamaz; panel butona basınca
+hangi kanalda kaç siparişin ne olacağını gösterip onay ister.
 
 Şimdilik yalnızca **Shopify** açık (`KANALLAR=shopify`).
 
@@ -34,7 +34,15 @@ Bir siparişin tekrar "Yeni siparişler"e düşmesini isterseniz Shopify'da etik
 4. **Settings → Networking → Generate Domain** ile panel adresini alın.
 5. Adrese girince tarayıcı kullanıcı adı/şifre soracak: `PANEL_USER` / `PANEL_PASSWORD`.
 
-### 3. API bilgileri
+### 3. Kalıcı kayıt (volume)
+Trendyol ve Hepsiburada'da etiket olmadığı için, Drive'a aktarılan siparişlerin kaydı
+sunucuda bir dosyada tutulur. Güncellemelerde silinmemesi için:
+1. Railway'de servise sağ tıklayın (ya da Ctrl/Cmd + K) → **Attach volume / Volume ekle**.
+2. Mount path olarak `/data` yazın.
+3. Variables'a `DATA_DIR=/data` ekleyin.
+Sadece Shopify kullanırken bu kayıt kullanılmaz; yine de şimdiden açmanız önerilir.
+
+### 4. API bilgileri
 
 **Shopify** (Ocak 2026'dan beri yeni uygulamalar Dev Dashboard'dan oluşturuluyor)
 1. Shopify admin → **Apps → Develop apps → Build apps in Dev Dashboard**.
