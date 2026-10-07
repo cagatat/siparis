@@ -290,10 +290,20 @@ const shopify = (() => {
     const a = o.rows[0]._ref.address;
     const r = await adres.check(a, { full: true });
     if (r.degisiklik) {
+      // Shopify adres güncellerken soyad ister. Müşteri ad-soyadı tek kutuya yazdıysa
+      // aynı tam adı ad + soyad olarak ikiye ayırırız; görünen isim değişmez.
+      let firstName = String(a.firstName || '').trim();
+      let lastName = String(a.lastName || '').trim();
+      if (!lastName) {
+        const parts = String(a.name || firstName).trim().split(/\s+/).filter(Boolean);
+        lastName = parts.pop() || '';
+        firstName = parts.join(' ');
+      }
+      if (!lastName) throw new Error('siparişte alıcı adı yok, adres Shopify\'da elle düzeltilmeli');
       const input = {
         id: o.rows[0]._ref.gid,
         shippingAddress: {
-          firstName: a.firstName, lastName: a.lastName, company: a.company, phone: a.phone,
+          firstName, lastName, company: a.company, phone: a.phone,
           address1: r.degisiklik.address1, address2: r.degisiklik.address2 || null,
           city: r.degisiklik.city, provinceCode: a.provinceCode, zip: a.zip, countryCode: a.countryCodeV2 || 'TR',
         },
@@ -1633,7 +1643,7 @@ call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.l
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-08 · adres düzenleme v3';
+const SURUM = '2026-10-08 · adres düzenleme v4';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
