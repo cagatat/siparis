@@ -295,7 +295,7 @@ const shopify = (() => {
         shippingAddress: {
           firstName: a.firstName, lastName: a.lastName, company: a.company, phone: a.phone,
           address1: r.degisiklik.address1, address2: r.degisiklik.address2 || null,
-          city: a.city, provinceCode: a.provinceCode, zip: a.zip, countryCode: a.countryCodeV2 || 'TR',
+          city: r.degisiklik.city, provinceCode: a.provinceCode, zip: a.zip, countryCode: a.countryCodeV2 || 'TR',
         },
       };
       const res = await gql(ORDER_UPDATE, { input });
@@ -590,8 +590,12 @@ const store = (() => {
 // ADRES KONTROLÜ (mahalle / ilçe / il)
 // ======================================================================
 const adres = (() => {
-  // Shopify adres kontrolü:
-  //  • il (provinceCode/province) ve ilçe (city) geçerli mi, ilçe o ile mi ait?
+  // Shopify adres kontrolü. Mağazanın ödeme formunda:
+  //    Adres (address1)                → mahalle, sokak, kapı no
+  //    Apartman, daire vb. (address2)  → ilçe
+  //    Şehir (city)                    → il
+  //  (Alanlar farklı kullanılmışsa il için province/city, ilçe için address2/city/adres metni de denenir.)
+  //  • il ve ilçe geçerli mi, ilçe o ile mi ait?
   //  • adres satırında mahalle var mı, varsa o ilçede gerçekten var mı?
   //  • mahalle yoksa sokak + ilçe + il ile haritada aranır, bulunursa adresin başına eklenir
   //  • adres satırının başında/sonunda tekrar yazılmış il ve ilçe adları temizlenir
@@ -631,7 +635,22 @@ const adres = (() => {
   function findIl(a) {
     const m = /^TR-?(\d{2})$/i.exec(a.provinceCode || '');
     if (m && tn.cityNamesByCode[m[1]]) return m[1];
-    return bestMatch(key(a.province), cityCodes, (c) => key(tn.cityNamesByCode[c]));
+    for (const v of [a.province, a.city]) {
+      const hit = bestMatch(key(v), cityCodes, (c) => key(tn.cityNamesByCode[c]));
+      if (hit) return hit;
+    }
+    // Şehir alanına il ile birlikte başka şey de yazılmış olabilir ("Adana Yüreğir")
+    const words = fold(a.city).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+    return cityCodes.find((c) => words.includes(key(tn.cityNamesByCode[c]))) || null;
+  }
+
+  // Metindeki kelimeler arasında o ilin bir ilçesi geçiyor mu?
+  function ilceInText(ilKod, text) {
+    const words = fold(text).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+    return tn.getDistrictsByCityCode(ilKod).find((d) => {
+      const parts = fold(d).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+      return words.some((_, i) => parts.every((p, j) => words[i + j] === p));
+    }) || null;
   }
 
   const findIlce = (ilKod, text) => bestMatch(key(text), tn.getDistrictsByCityCode(ilKod), key);
@@ -736,26 +755,35 @@ const adres = (() => {
     if (!a) return { durum: 'sorunlu', notlar: ['Teslimat adresi yok'] };
     const notlar = [];
     const ilKod = findIl(a);
-    if (!ilKod) return { durum: 'sorunlu', notlar: [`İl tanınamadı (${a.province || 'boş'})`] };
+    if (!ilKod) return { durum: 'sorunlu', notlar: [`İl tanınamadı (Şehir: ${a.city || 'boş'})`] };
     const ilAd = tn.cityNamesByCode[ilKod];
-    const metin = [a.address1, a.address2].filter(Boolean).join(' ');
 
-    let ilce = findIlce(ilKod, a.city);
-    if (!ilce) {
-      // ilçe alanı hatalıysa adres metninde ilçe adı arıyoruz
-      const words = fold(metin).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/);
-      ilce = tn.getDistrictsByCityCode(ilKod).find((d) => words.includes(key(d)));
-      notlar.push(ilce ? `İlçe alanı "${a.city || 'boş'}" ${ilAd} iline ait değil (adreste ${ilce} geçiyor)`
-                       : `İlçe "${a.city || 'boş'}" ${ilAd} ilinde bulunamadı`);
-      if (!ilce) return { durum: 'sorunlu', notlar, ilAd };
+    // İlçe: önce "Apartman, daire vb." alanı, sonra Şehir alanı, en son adres metni
+    let ilce = null;
+    let ilceAlani = null;
+    if ((ilce = findIlce(ilKod, a.address2) || ilceInText(ilKod, a.address2))) ilceAlani = 'address2';
+    else if ((ilce = findIlce(ilKod, a.city))) ilceAlani = 'city';
+    else if (!String(a.address2 || '').trim() && (ilce = ilceInText(ilKod, a.city))) ilceAlani = 'tasinacak';
+    else if ((ilce = ilceInText(ilKod, a.address1))) {
+      // İlçe sadece adres satırında yazıyor: "Apartman, daire vb." boşsa oraya taşınır
+      ilceAlani = String(a.address2 || '').trim() ? 'address1' : 'tasinacak';
+      if (ilceAlani === 'address1') notlar.push(`İlçe "Apartman, daire vb." alanında yok (adreste ${ilce} geçiyor)`);
+    } else {
+      notlar.push(`İlçe bulunamadı ("Apartman, daire vb." alanı: ${a.address2 || 'boş'}) – ${ilAd} ilinin ilçelerinden biri olmalı`);
+      return { durum: 'sorunlu', notlar, ilAd };
     }
+    // Mahalle/sokak metni: ilçe alanı olarak kullanılan satır hariç
+    const metin = [a.address1, ilceAlani === 'address2' ? '' : a.address2].filter(Boolean).join(' ');
 
     const list = mahalleler(ilKod, ilce);
     const bulunan = findMahalle(metin, list);
 
     // il/ilçe tekrarlarını temizle
     let address1 = cleanLine(a.address1, [ilAd, ilce]);
-    let address2 = cleanLine(a.address2, [ilAd, ilce]);
+    // İlçe alanı olarak kullanılan satıra dokunulmaz; boşsa ve ilçe adreste yazıyorsa oraya yazılır
+    let address2 = ilceAlani === 'address2' ? String(a.address2 || '').trim()
+      : ilceAlani === 'tasinacak' ? ilce
+      : cleanLine(a.address2, [ilAd, ilce]);
     let mahalle = bulunan.mahalle;
     let eklendi = false;
 
@@ -771,11 +799,15 @@ const adres = (() => {
     }
     if (!mahalle && !bulunan.yanlis) notlar.push('Adreste mahalle yok' + (full ? ', haritada da bulunamadı' : ''));
 
-    const degisti = address1 !== String(a.address1 || '').trim() || address2 !== String(a.address2 || '').trim();
+    // Şehir alanı ilçe olarak kullanılmıyorsa sadece il adı kalmalı
+    let city = String(a.city || '').trim();
+    if (ilceAlani !== 'city' && key(city) !== key(ilAd)) city = ilAd;
+
+    const degisti = address1 !== String(a.address1 || '').trim() || address2 !== String(a.address2 || '').trim() || city !== String(a.city || '').trim();
     return {
       durum: notlar.length ? 'sorunlu' : 'tamam',
       notlar, ilAd, ilce, mahalle, eklendi,
-      degisiklik: degisti ? { address1, address2 } : null,
+      degisiklik: degisti ? { address1, address2, city } : null,
     };
   }
 

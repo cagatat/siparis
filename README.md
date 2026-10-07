@@ -8,7 +8,10 @@ Panel üç aşamadan oluşur:
 | 2 · Panele çekilenler | 1. aşamadan çekilenler | **Drive'a aktar** | Google Sheet'teki "Siparişler" sayfasını temizleyip seçilenleri yazar, e-posta gönderir · Shopify: `drive'a aktarıldı - otomatik` etiketi · Trendyol/Hepsiburada: sistem kaydına alınır |
 | 3 · Etiket oluşturulanlar | Drive'a aktarılanlar (tarih aralığıyla) | **Excel indir** | Hiçbir şeyi değiştirmez |
 
-**Shopify adres kontrolü** ("Panele çek" sırasında, her sipariş için):
+**Shopify adres kontrolü** ("Panele çek" sırasında, her sipariş için). Ödeme formundaki alanlar şöyle okunur:
+"Adres" = mahalle, sokak, kapı no · "Apartman, daire vb." = ilçe · "Şehir" = il.
+- "Apartman, daire vb." alanına (ilçe) dokunulmaz. Boşsa ve ilçe adres satırında ya da Şehir alanında yazıyorsa oraya taşınır;
+  Şehir alanında "Adana Yüreğir" gibi fazlalık varsa sadece il adı bırakılır.
 - İl ve ilçe geçerli mi, ilçe o ile mi ait, adreste yazan mahalle o ilçede gerçekten var mı kontrol edilir.
 - Adreste mahalle yoksa sokak + ilçe + il ile haritada aranır; bulunan mahalle o ilçenin resmi
   listesinde varsa adresin başına "X Mah." olarak eklenir.
