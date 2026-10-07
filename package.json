@@ -1,0 +1,13 @@
+{
+  "name": "esse-jeffe-otomasyon",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Esse Jeffe günlük operasyon otomasyonları",
+  "main": "index.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2"
+  }
+}
