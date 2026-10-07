@@ -306,8 +306,7 @@ const shopify = (() => {
     return { sonuc: r.durum === 'sorunlu' ? 'sorunlu' : r.degisiklik ? 'duzeltildi' : 'tamam', notlar: r.notlar };
   }
 
-  // 1 → 2: adresleri kontrol et / düzelt, sonra panele çek etiketi ekle
-  async function advance(orders) {
+  async function fixAddresses(orders) {
     const adresSonuc = { duzeltildi: [], sorunlu: [], hata: [] };
     for (const o of orders) {
       try {
@@ -315,16 +314,23 @@ const shopify = (() => {
         if (r.sonuc === 'duzeltildi') adresSonuc.duzeltildi.push(o.siparisNo);
         if (r.sonuc === 'sorunlu') adresSonuc.sorunlu.push(`${o.siparisNo}: ${r.notlar.join(' · ')}`);
       } catch (e) {
+        console.error(`[adres] ${o.siparisNo}:`, e.message);
         adresSonuc.hata.push(`${o.siparisNo} (${e.message})`);
       }
     }
+    return adresSonuc;
+  }
+
+  // 1 → 2: adresleri kontrol et / düzelt, sonra panele çek etiketi ekle
+  async function advance(orders) {
+    const adres = await fixAddresses(orders);
     const res = await addTag(orders, T.panel);
-    return { ...res, adres: adresSonuc };
+    return { ...res, adres };
   }
   // 2 → 3: Drive'a aktarıldı
   const markExported = (orders) => addTag(orders, T.drive);
 
-  return { fetchRows, advance, markExported, usesStore: false };
+  return { fetchRows, advance, markExported, fixAddresses, usesStore: false };
 })();
 
 // ======================================================================
@@ -1316,6 +1322,14 @@ const flow = (() => {
     return { summary, failed, adres: adresSonuc, done: Object.values(summary).reduce((a, b) => a + b, 0) };
   }
 
+  // 2. aşamada adresleri yeniden kontrol et / düzelt (aşama değişmez; sadece Shopify)
+  async function fixAddresses({ sessionId, keys }) {
+    const { selected } = take(sessionId, keys, 'panel');
+    const orders = selected.filter((o) => o.kanal === 'Shopify');
+    if (!orders.length) throw new Error('Seçilenler arasında Shopify siparişi yok.');
+    return { adres: await shopify.fixAddresses(orders), count: orders.length };
+  }
+
   function fileName(prefix) {
     const p = (n) => String(n).padStart(2, '0');
     const tr = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Istanbul' }));
@@ -1377,7 +1391,7 @@ const flow = (() => {
     return { orderCount: selected.length, buffer, filename, mail, warnings: [] };
   }
 
-  return { list, advance, exportDrive, download };
+  return { list, advance, exportDrive, download, fixAddresses };
 })();
 
 // ======================================================================
@@ -1430,7 +1444,7 @@ const PAGE = `<!doctype html>
   .hide{display:none}
 </style></head>
 <body><div class="wrap">
-  <h1>Esse Jeffe Otomasyon</h1>
+  <h1>Esse Jeffe Otomasyon <small style="font-size:12px;font-weight:400;color:var(--muted)">{{SURUM}}</small></h1>
   <div class="tabs">
     <div class="tab on" data-stage="yeni">1 · Yeni gelen siparişler<span class="n" id="n-yeni">–</span></div>
     <div class="tab" data-stage="panel">2 · Panele çekilenler<span class="n" id="n-panel">–</span></div>
@@ -1442,6 +1456,7 @@ const PAGE = `<!doctype html>
       <button id="fetch" class="ghost">Yenile</button>
       <span style="flex:1"></span>
       <label class="chk" id="mailBox"><input type="checkbox" id="mail" checked> E-posta da gönder</label>
+      <button id="fix" class="ghost hide" disabled>Adresleri düzelt</button>
       <button id="excel" class="ghost" disabled>Excel indir</button>
       <button id="action" disabled>Panele çek</button>
     </div>
@@ -1479,6 +1494,7 @@ function setStage(s) {
   $('action').classList.toggle('hide', !STAGES[s].action);
   $('action').dataset.label = STAGES[s].action || '';
   $('mailBox').classList.toggle('hide', s === 'yeni');
+  $('fix').classList.toggle('hide', s !== 'panel');
   $('mail').checked = s === 'panel';
   $('fetch').textContent = s === 'drive' ? 'Getir' : 'Yenile';
   $('hint').textContent = STAGES[s].hint;
@@ -1493,7 +1509,7 @@ function selected() { return [...document.querySelectorAll('.pick:checked')].map
 function update() {
   const n = selected().length;
   const label = $('action').dataset.label;
-  $('action').disabled = !n; $('excel').disabled = !n;
+  $('action').disabled = !n; $('excel').disabled = !n; $('fix').disabled = !n;
   $('action').textContent = n ? label + ' (' + n + ')' : label;
   $('excel').textContent = n ? 'Excel indir (' + n + ')' : 'Excel indir';
   $('all').checked = n && n === orders.length;
@@ -1582,6 +1598,24 @@ $('action').onclick = async () => {
   finally { busy($('action'), false); }
 };
 
+function adresMsg(a) {
+  if (!a) return '';
+  return 'Adres kontrolü: ' + a.duzeltildi.length + ' adres düzeltildi' +
+    (a.sorunlu.length ? ', <span class="warn">' + a.sorunlu.length + ' adreste sorun var (kırmızı)</span>' : '') +
+    warnHtml(a.hata.map((x) => 'Adres güncellenemedi: ' + x));
+}
+
+$('fix').onclick = async () => {
+  busy($('fix'), true);
+  try {
+    const d = await post('/api/adres-duzelt', { sessionId: session, keys: selected() });
+    const msg = adresMsg(d.adres);
+    await load();
+    $('msg').innerHTML = msg + $('msg').innerHTML;
+  } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
+  finally { $('fix').textContent = 'Adresleri düzelt'; update(); }
+};
+
 $('excel').onclick = async () => {
   busy($('excel'), true);
   try {
@@ -1599,7 +1633,9 @@ call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.l
 // ======================================================================
 // SUNUCU
 // ======================================================================
+const SURUM = '2026-10-08 · adres düzenleme v3';
 const app = express();
+app.get('/surum', (_req, res) => res.send(SURUM));
 
 // --- Basit şifre koruması (tarayıcının kendi giriş penceresi) ---
 function auth(req, res, next) {
@@ -1661,6 +1697,11 @@ app.post('/api/panele-cek', handle(exclusive(async (req) => {
   return flow.advance({ sessionId, keys });
 })));
 
+app.post('/api/adres-duzelt', handle(exclusive(async (req) => {
+  const { sessionId, keys } = req.body || {};
+  return flow.fixAddresses({ sessionId, keys });
+})));
+
 app.post('/api/drive', handle(exclusive(async (req) => {
   const { sessionId, keys, email } = req.body || {};
   const out = await flow.exportDrive({ sessionId, keys, email: email !== false });
@@ -1686,7 +1727,7 @@ app.get('/indir/:id', (req, res) => {
   res.send(Buffer.from(f.buffer));
 });
 
-app.get('/', (_req, res) => res.type('html').send(PAGE));
+app.get('/', (_req, res) => res.type('html').send(PAGE.replace('{{SURUM}}', SURUM)));
 
 app.listen(config.port, () => console.log(`Panel hazır: port ${config.port}`));
 
