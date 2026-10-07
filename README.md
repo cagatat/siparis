@@ -4,32 +4,20 @@
 
 **Yeni siparişler sekmesi**
 1. "Siparişleri getir" → kargoya verilmemiş ve henüz etiketlenmemiş siparişler tabloda görünür.
+   Her satır bir sipariş; SKU'lar alt alta yazılır, siparişten çıkarılmış ya da değiştirilmiş
+   ürünler listelenmez. En sağdaki "Etiketler" kolonunda siparişe yazdığınız etiketler/notlar görünür.
 2. Listeye girmesini istemediğiniz siparişlerin işaretini kaldırın (hepsi seçili gelir).
-3. "Excel oluştur" → seçilenler Excel'e alınır, e-postanıza gönderilir (kutucuk işaretliyse),
-   panelden indirilebilir ve Shopify'da `etiketi çıkarıldı - otomatik` etiketi eklenir.
-   Etiketli siparişler bir daha bu sekmede çıkmaz; seçmedikleriniz bir sonraki listede yine görünür.
+3. "Excel oluştur" → seçilenler Google Sheet'e yeni bir sekme olarak yazılır, Excel olarak
+   panelden indirilebilir, e-postanıza (Sheet linki + Excel eki) gönderilir ve Shopify'da
+   `etiketi çıkarıldı - otomatik` etiketi eklenir. Etiketli siparişler bir daha bu sekmede çıkmaz.
 
 **Geçmiş (etiketlenmiş) sekmesi**
 Tarih aralığı seçip daha önce etiketlenmiş siparişleri görebilir, seçtiklerinizi tekrar
-Excel'e alabilirsiniz. Bu sekme etiketlere dokunmaz.
+listeye alabilirsiniz. Bu sekme etiketlere dokunmaz.
 
 Bir siparişin tekrar "Yeni siparişler"e düşmesini isterseniz Shopify'da etiketini silmeniz yeterli.
 
-Şimdilik yalnızca **Shopify** açık (`KANALLAR=shopify`). Trendyol ve Hepsiburada'nın kodu
-hazır; açmak için `KANALLAR=shopify,trendyol,hepsiburada` yapmanız yeterli.
-
-Sıradaki modül: DHL teslim edilemeyen paket uyarıcısı (DHL API dokümanı bekleniyor).
-
-## Excel'de ne var?
-
-Her satır bir ürün. Sayfalar: **Tümü**, **Shopify**, **Trendyol**, **Hepsiburada**; bir kanal
-hata verirse diğerleri yine listelenir ve hata **Uyarılar** sayfasına yazılır.
-
-| Kanal | Hangi siparişler | Kargo anahtarı |
-|---|---|---|
-| Shopify | Gönderilmemiş / kısmi gönderilmiş, iptal edilmemiş | Siparişin uzun sistem ID'si |
-| Trendyol | Created, Picking, Invoiced (son 14 gün) | Trendyol'un kargo takip numarası |
-| Hepsiburada | Paketlenecek kalemler + paketlenip kargoya verilmemiş paketler | Paket barkodu (paketlenmemişlerde boş) |
+Şimdilik yalnızca **Shopify** açık (`KANALLAR=shopify`).
 
 ## Kurulum (bir kerelik)
 
@@ -61,6 +49,16 @@ hata verirse diğerleri yine listelenir ve hata **Uyarılar** sayfasına yazıl�
 **Hepsiburada:** Satıcı panelinden API bilgileri. Panelde yoksa Yardım Merkezi → Satıcı
 Destek Talep Formu → API Entegrasyon üzerinden talep edilir. Merchant ID, API şifresi ve
 size verilen entegratör kullanıcı adı (`HB_USER_AGENT`) gerekiyor.
+
+**Google Sheets (servis hesabı):**
+1. console.cloud.google.com → yeni proje oluşturun.
+2. "APIs & Services → Library" → **Google Sheets API**'yi bulup **Enable**.
+3. "IAM & Admin → Service Accounts" → **Create service account** (ad: esse-otomasyon), rol vermeden bitirin.
+4. Hesaba girip **Keys → Add key → Create new key → JSON**. Bir .json dosyası iner.
+5. Bu dosyayı metin düzenleyiciyle açıp içeriğinin tamamını `GOOGLE_SERVICE_ACCOUNT_JSON` değişkenine yapıştırın.
+6. Siparişlerin yazılacağı Google Sheet'i açın → **Paylaş** → dosyadaki `client_email`
+   adresini **Düzenleyen** olarak ekleyin.
+7. Tablonun adresindeki `/d/` ile `/edit` arasındaki kodu `GOOGLE_SHEET_ID`'ye yazın.
 
 **E-posta (Resend):** resend.com'da hesap açın, `essejeffe.com` alan adını doğrulayın
 (DNS'e birkaç kayıt eklenir), API anahtarını `RESEND_API_KEY`'e girin.

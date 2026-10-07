@@ -37,6 +37,10 @@ const config = (() => {
       password: env('HB_PASSWORD'),
       userAgent: env('HB_USER_AGENT'),
     },
+    google: {
+      sheetId: env('GOOGLE_SHEET_ID'),
+      serviceAccount: env('GOOGLE_SERVICE_ACCOUNT_JSON'),
+    },
     mail: {
       resendKey: env('RESEND_API_KEY'),
       from: env('MAIL_FROM'),
@@ -154,6 +158,7 @@ const shopify = (() => {
             variantTitle
             sku
             quantity
+            currentQuantity
             unfulfilledQuantity
             originalUnitPriceSet { shopMoney { amount } }
           }
@@ -190,6 +195,11 @@ const shopify = (() => {
     return `status:open AND (fulfillment_status:unfulfilled OR fulfillment_status:partial) AND NOT ${tag}`;
   }
 
+  const DURUM = {
+    UNFULFILLED: 'Gönderilmedi', PARTIALLY_FULFILLED: 'Kısmen gönderildi', FULFILLED: 'Gönderildi',
+    ON_HOLD: 'Beklemede', SCHEDULED: 'Planlandı', IN_PROGRESS: 'Hazırlanıyor', OPEN: 'Açık',
+  };
+
   async function fetchRows(opts = {}) {
     checkConfig();
     const history = opts.mode === 'gecmis';
@@ -206,8 +216,10 @@ const shopify = (() => {
           o.shippingAddress?.name ||
           [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ');
         for (const li of o.lineItems.nodes) {
-          const qty = history ? li.quantity : li.unfulfilledQuantity;
-          if (!qty) continue; // yeni listede gönderilmiş kalemleri atla
+          // currentQuantity: siparişten çıkarılan / değiştirilen ürünlerde 0 olur.
+          const current = li.currentQuantity ?? li.quantity;
+          const qty = history ? current : Math.min(li.unfulfilledQuantity, current);
+          if (!qty) continue; // çıkarılmış, değiştirilmiş ya da (yeni listede) gönderilmiş kalem
           const unit = toNumber(li.originalUnitPriceSet?.shopMoney?.amount);
           rows.push({
             _key: o.id,
@@ -225,7 +237,8 @@ const shopify = (() => {
             adet: qty,
             tutar: unit != null ? unit * qty : null,
             odemeTipi: (o.paymentGatewayNames || []).join(', '),
-            durum: o.cancelledAt ? 'İPTAL' : o.displayFulfillmentStatus,
+            durum: o.cancelledAt ? 'İptal' : (DURUM[o.displayFulfillmentStatus] || o.displayFulfillmentStatus),
+            etiketler: (o.tags || []).filter((t) => t !== cfg.tag).join(', '),
           });
         }
       }
@@ -411,52 +424,63 @@ const hepsiburada = (() => {
 // EXCEL
 // ======================================================================
 const excel = (() => {
-
+  // Her satır bir sipariş. Excel ve Google Sheet aynı kolon düzenini kullanır.
   const COLUMNS = [
-    { header: 'Kanal', key: 'kanal', width: 13 },
-    { header: 'Sipariş No', key: 'siparisNo', width: 18 },
-    { header: 'Sipariş Tarihi', key: 'tarih', width: 17, style: { numFmt: 'dd.mm.yyyy hh:mm' } },
+    { header: 'Kanal', key: 'kanal', width: 12 },
+    { header: 'Sipariş No', key: 'siparisNo', width: 14 },
+    { header: 'Sipariş Tarihi', key: 'tarih', width: 17 },
     { header: 'Müşteri', key: 'musteri', width: 22 },
-    { header: 'Telefon', key: 'telefon', width: 15 },
-    { header: 'Kargo Firması', key: 'kargoFirmasi', width: 16 },
-    { header: 'Kargo Anahtarı', key: 'kargoAnahtari', width: 20 },
-    { header: 'Ürün', key: 'urun', width: 38 },
-    { header: 'Renk / Beden', key: 'varyant', width: 16 },
-    { header: 'SKU', key: 'sku', width: 16 },
+    { header: 'Telefon', key: 'telefon', width: 16 },
+    { header: 'Kargo Firması', key: 'kargoFirmasi', width: 15 },
+    { header: 'Kargo Anahtarı', key: 'kargoAnahtari', width: 18 },
+    { header: 'SKU', key: 'sku', width: 24 },
     { header: 'Adet', key: 'adet', width: 7 },
-    { header: 'Tutar (₺)', key: 'tutar', width: 12, style: { numFmt: '#,##0.00' } },
-    { header: 'Ödeme', key: 'odemeTipi', width: 18 },
-    { header: 'Durum', key: 'durum', width: 14 },
+    { header: 'Tutar (₺)', key: 'tutar', width: 12 },
+    { header: 'Ödeme', key: 'odemeTipi', width: 16 },
+    { header: 'Durum', key: 'durum', width: 13 },
+    { header: 'Etiketler', key: 'etiketler', width: 30 },
   ];
+
+  const skuText = (o) => o.skus.map((x) => (x.adet > 1 ? `${x.sku} ×${x.adet}` : x.sku)).join('\n');
+  const dateText = (d) => d ? new Date(d).toLocaleString('tr-TR', {
+    timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  }) : '';
+
+  // Sipariş -> düz değerler (Excel ve Sheet için ortak)
+  function toRecord(o) {
+    return {
+      kanal: o.kanal, siparisNo: o.siparisNo, tarih: dateText(o.tarih), musteri: o.musteri,
+      telefon: o.telefon, kargoFirmasi: o.kargoFirmasi, kargoAnahtari: o.kargoAnahtari,
+      sku: skuText(o), adet: o.adet, tutar: o.tutar ? Math.round(o.tutar * 100) / 100 : '',
+      odemeTipi: o.odemeTipi, durum: o.durum, etiketler: o.etiketler || '',
+    };
+  }
 
   const FONT = { name: 'Arial', size: 10 };
 
-  function addSheet(wb, name, rows) {
+  function addSheet(wb, name, orders) {
     const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1 }] });
     ws.columns = COLUMNS;
-    rows.forEach((r) => ws.addRow(r));
+    orders.forEach((o) => ws.addRow(toRecord(o)));
+    ws.getColumn('tutar').numFmt = '#,##0.00';
+    ['siparisNo', 'kargoAnahtari', 'telefon'].forEach((k) => (ws.getColumn(k).numFmt = '@'));
     ws.eachRow((row, i) => {
       row.font = i === 1 ? { ...FONT, bold: true, color: { argb: 'FFFFFFFF' } } : FONT;
+      row.alignment = { vertical: 'top', wrapText: true };
       if (i === 1) {
         row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B2A2F' } };
         row.height = 20;
       }
     });
-    // Uzun ID'ler bilimsel gösterime dönmesin diye kargo anahtarı ve sipariş no metin.
-    ['siparisNo', 'kargoAnahtari', 'telefon'].forEach((k) => (ws.getColumn(k).numFmt = '@'));
-    if (rows.length) ws.autoFilter = { from: 'A1', to: { row: 1, column: COLUMNS.length } };
-    return ws;
+    if (orders.length) ws.autoFilter = { from: 'A1', to: { row: 1, column: COLUMNS.length } };
   }
 
-  async function buildWorkbook(rows, warnings = [], channels = ['Shopify', 'Trendyol', 'Hepsiburada']) {
+  async function buildWorkbook(orders, warnings = [], channels = ['Shopify', 'Trendyol', 'Hepsiburada']) {
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Esse Jeffe Otomasyon';
-    const sorted = [...rows].sort((a, b) => (a.tarih || 0) - (b.tarih || 0));
     // Tek kanal açıksa tek sayfa; birden fazlaysa "Tümü" + kanal sayfaları.
-    if (channels.length > 1) addSheet(wb, 'Tümü', sorted);
-    for (const kanal of channels) {
-      addSheet(wb, kanal, sorted.filter((r) => r.kanal === kanal));
-    }
+    if (channels.length > 1) addSheet(wb, 'Tümü', orders);
+    for (const kanal of channels) addSheet(wb, kanal, orders.filter((o) => o.kanal === kanal));
     if (warnings.length) {
       const ws = wb.addWorksheet('Uyarılar');
       ws.columns = [{ header: 'Uyarı', key: 'w', width: 120 }];
@@ -466,7 +490,7 @@ const excel = (() => {
     return wb.xlsx.writeBuffer();
   }
 
-  return { buildWorkbook };
+  return { buildWorkbook, COLUMNS, toRecord };
 })();
 
 // ======================================================================
@@ -500,6 +524,90 @@ const mailer = (() => {
 })();
 
 // ======================================================================
+// GOOGLE SHEETS (her liste tablonun başına yeni bir sekme olarak eklenir)
+// ======================================================================
+const sheets = (() => {
+  const cfg = config.google;
+  const API = 'https://sheets.googleapis.com/v4/spreadsheets';
+  let cached = null; // { token, expiresAt }
+
+  const b64url = (v) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
+
+  async function getToken() {
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+    let sa;
+    try { sa = JSON.parse(cfg.serviceAccount); } catch { throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON okunamadı (JSON dosyasının tamamını yapıştırın)'); }
+    const now = Math.floor(Date.now() / 1000);
+    const unsigned = b64url({ alg: 'RS256', typ: 'JWT' }) + '.' + b64url({
+      iss: sa.client_email, scope: 'https://www.googleapis.com/auth/spreadsheets',
+      aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600,
+    });
+    const signature = crypto.createSign('RSA-SHA256').update(unsigned).sign(sa.private_key, 'base64url');
+    const data = await util.httpJson('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${signature}` }),
+    }, 'Google token');
+    cached = { token: data.access_token, expiresAt: Date.now() + (data.expires_in || 3600) * 1000 };
+    return cached.token;
+  }
+
+  async function api(path, method, body) {
+    const token = await getToken();
+    return util.httpJson(`${API}/${cfg.sheetId}${path}`, {
+      method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    }, 'Google Sheets');
+  }
+
+  function tabTitle(prefix) {
+    const t = new Date().toLocaleString('tr-TR', {
+      timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    return `${prefix} ${t}`.replace(/[\[\]:*?\/\\]/g, '.');
+  }
+
+  async function writeOrders(orders, prefix) {
+    if (!cfg.sheetId || !cfg.serviceAccount) return { skipped: true };
+    const title = tabTitle(prefix);
+    const cols = excel.COLUMNS;
+
+    const added = await api(':batchUpdate', 'POST', {
+      requests: [{ addSheet: { properties: { title, index: 0, gridProperties: { frozenRowCount: 1 } } } }],
+    });
+    const gid = added.replies[0].addSheet.properties.sheetId;
+
+    const values = [cols.map((c) => c.header), ...orders.map((o) => {
+      const r = excel.toRecord(o);
+      return cols.map((c) => r[c.key] ?? '');
+    })];
+    const range = encodeURIComponent(`'${title.replace(/'/g, "''")}'!A1`);
+    // RAW: uzun ID'ler ve telefonlar sayıya dönüşmeden metin olarak kalır.
+    await api(`/values/${range}?valueInputOption=RAW`, 'PUT', { values });
+
+    const n = cols.length;
+    await api(':batchUpdate', 'POST', { requests: [
+      { repeatCell: {
+          range: { sheetId: gid, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: n },
+          cell: { userEnteredFormat: { textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                  backgroundColor: { red: 0.231, green: 0.165, blue: 0.184 } } },
+          fields: 'userEnteredFormat(textFormat,backgroundColor)' } },
+      { repeatCell: {
+          range: { sheetId: gid, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: n },
+          cell: { userEnteredFormat: { wrapStrategy: 'WRAP', verticalAlignment: 'TOP' } },
+          fields: 'userEnteredFormat(wrapStrategy,verticalAlignment)' } },
+      ...cols.map((c, i) => ({ updateDimensionProperties: {
+          range: { sheetId: gid, dimension: 'COLUMNS', startIndex: i, endIndex: i + 1 },
+          properties: { pixelSize: Math.round(c.width * 8) }, fields: 'pixelSize' } })),
+    ] });
+
+    return { url: `https://docs.google.com/spreadsheets/d/${cfg.sheetId}/edit#gid=${gid}`, title };
+  }
+
+  return { writeOrders };
+})();
+
+// ======================================================================
 // SİPARİŞ AKIŞI
 // ======================================================================
 const orders = (() => {
@@ -523,19 +631,21 @@ const orders = (() => {
     return id;
   }
 
-  // Panelde her sipariş tek satır; ürünler altında listelenir.
+  // Her sipariş tek satır; SKU'lar alt alta listelenir.
   function groupByOrder(rows) {
     const map = new Map();
     for (const r of rows) {
       if (!map.has(r._key)) {
         map.set(r._key, {
           key: r._key, kanal: r.kanal, siparisNo: r.siparisNo, tarih: r.tarih, musteri: r.musteri,
-          telefon: r.telefon, kargoAnahtari: r.kargoAnahtari, odemeTipi: r.odemeTipi, durum: r.durum,
-          tutar: 0, urunler: [],
+          telefon: r.telefon, kargoFirmasi: r.kargoFirmasi, kargoAnahtari: r.kargoAnahtari,
+          odemeTipi: r.odemeTipi, durum: r.durum, etiketler: r.etiketler || '',
+          tutar: 0, adet: 0, skus: [],
         });
       }
       const o = map.get(r._key);
-      o.urunler.push({ urun: r.urun, varyant: r.varyant, adet: r.adet });
+      o.skus.push({ sku: r.sku || r.urun || '(SKU yok)', adet: r.adet });
+      o.adet += r.adet || 0;
       o.tutar += r.tutar || 0;
     }
     return [...map.values()].sort((a, b) => (b.tarih || 0) - (a.tarih || 0));
@@ -578,35 +688,48 @@ const orders = (() => {
     if (!rows.length) throw new Error("Seçilen siparişler bu listeden zaten Excel'e alınmış; siparişleri yeniden getirin.");
 
     const warnings = [...s.warnings];
+    const selected = groupByOrder(rows);
+    const history = s.mode === 'gecmis';
     let tagging = null;
-    let buffer = await buildWorkbook(rows, warnings, s.channels);
+    let buffer = await buildWorkbook(selected, warnings, s.channels);
 
     // Etiketleme yalnızca yeni listede ve Excel sorunsuz oluştuktan sonra yapılır.
-    if (s.mode === 'yeni' && rows.some((r) => r._gid)) {
+    if (!history && rows.some((r) => r._gid)) {
       tagging = await shopify.tagOrders(rows);
       if (tagging.failed.length) {
         warnings.push(`Shopify etiketlenemeyen siparişler (bir sonraki listede tekrar çıkar): ${tagging.failed.join('; ')}`);
-        buffer = await buildWorkbook(rows, warnings, s.channels);
       }
       // Aynı listeden ikinci kez etiketleme yapılmasın diye seçilenleri oturumdan çıkar.
       s.rows = s.rows.filter((r) => !wanted.has(r._key));
     }
 
-    const history = s.mode === 'gecmis';
+    // Google Sheet: tablonun başına yeni sekme
+    let sheet = { skipped: true };
+    try {
+      sheet = await sheets.writeOrders(selected, history ? 'Geçmiş' : 'Liste');
+    } catch (e) {
+      console.error(e);
+      sheet = { error: e.message };
+      warnings.push(`Google Sheet'e yazılamadı: ${e.message}`);
+    }
+
+    if (warnings.length !== s.warnings.length) buffer = await buildWorkbook(selected, warnings, s.channels);
+
     const filename = fileName(history ? 'gecmis_siparisler' : 'siparisler');
-    const orderCount = new Set(rows.map((r) => r._key)).size;
+    const orderCount = selected.length;
 
     let mail = { skipped: true };
     if (email) {
       const title = history
         ? `Etiketlenmiş siparişler (${s.from || '…'} – ${s.to || '…'})`
         : 'Kargoya verilecek siparişler';
+      const sheetLine = sheet.url ? `<p><a href="${sheet.url}">Google Sheet'te aç</a> (sekme: ${sheet.title})</p>` : '';
       const tagLine = tagging ? `<p>${tagging.tagged} Shopify siparişine "${config.shopify.tag}" etiketi eklendi.</p>` : '';
       const warn = warnings.length ? `<p style="color:#b00020"><b>Uyarı:</b><br>${warnings.join('<br>')}</p>` : '';
       try {
         mail = await sendMail({
           subject: `${title} – ${orderCount} sipariş`,
-          html: `<p>${title}: <b>${orderCount}</b> sipariş ekteki Excel'de.</p>${tagLine}${warn}`,
+          html: `<p>${title}: <b>${orderCount}</b> sipariş. Excel ekte.</p>${sheetLine}${tagLine}${warn}`,
           attachments: [{ filename, content: buffer }],
         });
       } catch (e) {
@@ -614,7 +737,7 @@ const orders = (() => {
         console.error(e);
       }
     }
-    return { buffer, filename, orderCount, warnings, mail, tagged: tagging ? tagging.tagged : 0 };
+    return { buffer, filename, orderCount, warnings, mail, sheet, tagged: tagging ? tagging.tagged : 0 };
   }
 
   return { fetchOrders, exportSelected };
@@ -628,33 +751,38 @@ const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Esse Jeffe Otomasyon</title>
 <style>
-  :root{--ink:#2b2023;--muted:#7a6a6e;--brand:#3b2a2f;--bg:#f6f2ee;--line:#ece4df;--warn:#b00020;--ok:#1d6b3a}
+  :root{--ink:#2b2023;--muted:#7a6a6e;--brand:#3b2a2f;--bg:#f6f2ee;--line:#e6dcd6;--zebra:#fcfaf8;--warn:#b00020;--ok:#1d6b3a}
   *{box-sizing:border-box}
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:20px}
-  .wrap{max-width:1100px;margin:0 auto}
-  h1{font-size:20px;margin:0 0 16px}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:20px 24px;font-size:15px}
+  .wrap{max-width:1800px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 16px}
   .tabs{display:flex;gap:6px;margin-bottom:-1px}
-  .tab{padding:10px 16px;border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;background:#efe8e3;cursor:pointer;font-weight:600;color:var(--muted)}
+  .tab{padding:11px 18px;border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;background:#efe8e3;cursor:pointer;font-weight:600;color:var(--muted)}
   .tab.on{background:#fff;color:var(--ink)}
-  .card{background:#fff;border:1px solid var(--line);border-radius:0 12px 12px 12px;padding:18px}
-  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
-  button{padding:11px 16px;font-size:14px;font-weight:600;border:0;border-radius:10px;background:var(--brand);color:#fff;cursor:pointer}
-  button.ghost{background:#efe8e3;color:var(--ink)}
+  .card{background:#fff;border:1px solid var(--line);border-radius:0 12px 12px 12px;padding:20px}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+  button{padding:12px 18px;font-size:15px;font-weight:600;border:0;border-radius:10px;background:var(--brand);color:#fff;cursor:pointer}
   button:disabled{opacity:.5;cursor:not-allowed}
-  input[type=date]{padding:9px;border:1px solid var(--line);border-radius:8px;font:inherit}
-  label.chk{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--muted)}
-  .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
-  table{border-collapse:collapse;width:100%;font-size:13px;min-width:860px}
-  th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-  th{background:#faf7f5;font-weight:600;position:sticky;top:0}
-  tr.off td{opacity:.45}
+  input[type=date]{padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit}
+  label.chk{display:flex;align-items:center;gap:6px;color:var(--muted)}
+  .scroll{overflow:auto;max-height:calc(100vh - 230px);border:1px solid var(--line);border-radius:10px}
+  table{border-collapse:collapse;width:100%;font-size:15px;min-width:1100px}
+  th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;line-height:1.45}
+  th{background:#f3ece7;font-weight:700;position:sticky;top:0;z-index:1;white-space:nowrap}
+  tbody tr:nth-child(even) td{background:var(--zebra)}
+  tbody tr:hover td{background:#f5ede8}
+  tr.off td{opacity:.4}
   td.num{text-align:right;white-space:nowrap}
-  .urun{display:block;white-space:nowrap}
-  .tagk{font-family:ui-monospace,Menlo,monospace;font-size:12px}
-  .empty{padding:30px;text-align:center;color:var(--muted)}
-  #msg{margin-top:12px;font-size:14px;line-height:1.6}
+  td.nowrap{white-space:nowrap}
+  .sku{display:block;font-family:ui-monospace,Menlo,monospace;font-size:14px;white-space:nowrap}
+  .mono{font-family:ui-monospace,Menlo,monospace;font-size:14px}
+  .tags{color:#5b4a4f;min-width:220px}
+  input[type=checkbox]{width:18px;height:18px}
+  .empty{padding:40px;text-align:center;color:var(--muted)}
+  #hint{font-size:14px;color:var(--muted);margin-bottom:10px}
+  #msg{margin-top:12px;line-height:1.7}
   .warn{color:var(--warn)} .ok{color:var(--ok)}
-  a.dl{font-weight:700;color:var(--brand)}
+  a.dl{font-weight:700;color:var(--brand);margin-right:16px}
   .hide{display:none}
 </style></head>
 <body><div class="wrap">
@@ -673,27 +801,28 @@ const PAGE = `<!doctype html>
       <label class="chk"><input type="checkbox" id="mail" checked> E-posta da gönder</label>
       <button id="export" disabled>Excel oluştur</button>
     </div>
-    <div id="hint" style="font-size:13px;color:var(--muted);margin-bottom:10px"></div>
+    <div id="hint"></div>
     <div class="scroll"><table>
       <thead><tr>
         <th><input type="checkbox" id="all"></th><th>Kanal</th><th>Sipariş</th><th>Tarih</th><th>Müşteri</th>
-        <th>Telefon</th><th>Ürünler</th><th>Tutar</th><th>Ödeme</th><th>Kargo anahtarı</th><th>Durum</th>
+        <th>Telefon</th><th>SKU</th><th>Tutar</th><th>Ödeme</th><th>Kargo anahtarı</th><th>Durum</th><th>Etiketler</th>
       </tr></thead>
-      <tbody id="rows"><tr><td colspan="11" class="empty">"Siparişleri getir"e basın.</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="12" class="empty">"Siparişleri getir"e basın.</td></tr></tbody>
     </table></div>
     <div id="msg"></div>
   </div>
 </div>
 <script>
 let mode = 'yeni', session = null, orders = [];
+const COLS = 12;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money = (n) => n ? n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₺' : '';
 const when = (d) => d ? new Date(d).toLocaleString('tr-TR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
 const iso = (d) => d.toISOString().slice(0, 10);
+const empty = (t) => '<tr><td colspan="' + COLS + '" class="empty">' + t + '</td></tr>';
 
-const today = new Date(); const weekAgo = new Date(Date.now() - 6 * 864e5);
-$('bas').value = iso(weekAgo); $('bit').value = iso(today);
+$('bas').value = iso(new Date(Date.now() - 6 * 864e5)); $('bit').value = iso(new Date());
 
 function setHint() {
   $('hint').textContent = mode === 'yeni'
@@ -706,7 +835,7 @@ document.querySelectorAll('.tab').forEach((t) => t.onclick = () => {
   document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('on', x === t));
   mode = t.dataset.mode; session = null; orders = [];
   $('range').classList.toggle('hide', mode !== 'gecmis');
-  $('rows').innerHTML = '<tr><td colspan="11" class="empty">"Siparişleri getir"e basın.</td></tr>';
+  $('rows').innerHTML = empty('"Siparişleri getir"e basın.');
   $('msg').innerHTML = ''; setHint(); update();
 });
 
@@ -722,17 +851,17 @@ $('all').onchange = (e) => { document.querySelectorAll('.pick').forEach((c) => c
 
 function render() {
   if (!orders.length) {
-    $('rows').innerHTML = '<tr><td colspan="11" class="empty">' +
-      (mode === 'yeni' ? 'Kargoya verilecek yeni sipariş yok.' : 'Bu tarih aralığında etiketlenmiş sipariş yok.') + '</td></tr>';
+    $('rows').innerHTML = empty(mode === 'yeni' ? 'Kargoya verilecek yeni sipariş yok.' : 'Bu tarih aralığında etiketlenmiş sipariş yok.');
     return update();
   }
   $('rows').innerHTML = orders.map((o) =>
     '<tr><td><input type="checkbox" class="pick" value="' + esc(o.key) + '" checked></td>' +
-    '<td>' + esc(o.kanal) + '</td><td><b>' + esc(o.siparisNo) + '</b></td><td>' + when(o.tarih) + '</td>' +
-    '<td>' + esc(o.musteri) + '</td><td>' + esc(o.telefon) + '</td>' +
-    '<td>' + o.urunler.map((u) => '<span class="urun">' + esc(u.urun) + (u.varyant ? ' – ' + esc(u.varyant) : '') + ' ×' + esc(u.adet) + '</span>').join('') + '</td>' +
+    '<td>' + esc(o.kanal) + '</td><td class="nowrap"><b>' + esc(o.siparisNo) + '</b></td><td class="nowrap">' + when(o.tarih) + '</td>' +
+    '<td>' + esc(o.musteri) + '</td><td class="nowrap">' + esc(o.telefon) + '</td>' +
+    '<td>' + o.skus.map((x) => '<span class="sku">' + esc(x.sku) + (x.adet > 1 ? ' ×' + esc(x.adet) : '') + '</span>').join('') + '</td>' +
     '<td class="num">' + money(o.tutar) + '</td><td>' + esc(o.odemeTipi) + '</td>' +
-    '<td class="tagk">' + esc(o.kargoAnahtari) + '</td><td>' + esc(o.durum) + '</td></tr>'
+    '<td class="mono">' + esc(o.kargoAnahtari) + '</td><td>' + esc(o.durum) + '</td>' +
+    '<td class="tags">' + esc(o.etiketler) + '</td></tr>'
   ).join('');
   document.querySelectorAll('.pick').forEach((c) => c.onchange = update);
   update();
@@ -767,10 +896,11 @@ $('export').onclick = async () => {
     const mail = d.mail.sent ? 'E-postanıza gönderildi.' :
       d.mail.error ? '<span class="warn">E-posta gönderilemedi: ' + esc(d.mail.error) + '</span>' :
       $('mail').checked ? 'E-posta ayarlı değil.' : '';
-    $('msg').innerHTML = '<span class="ok">' + d.orderCount + ' sipariş Excel\\'e alındı.</span>' +
+    $('msg').innerHTML = '<span class="ok">' + d.orderCount + ' sipariş listeye alındı.</span>' +
       (d.tagged ? ' ' + d.tagged + ' sipariş etiketlendi.' : '') + ' ' + mail +
       (d.warnings.length ? '<p class="warn">' + d.warnings.map(esc).join('<br>') + '</p>' : '') +
-      '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>';
+      '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>' +
+      (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '');
     if (mode === 'yeni') { orders = orders.filter((o) => !keys.includes(o.key)); render(); }
   } catch (e) { $('msg').innerHTML = '<p class="warn">' + esc(e.message) + '</p>'; update(); }
   finally { if ($('export').textContent === 'Hazırlanıyor…') update(); }
@@ -844,6 +974,7 @@ app.post('/api/excel', express.json(), once(async (req, res) => {
     tagged: out.tagged,
     warnings: out.warnings,
     mail: out.mail,
+    sheetUrl: out.sheet && out.sheet.url,
     download: `/indir/${keep(out.buffer, out.filename)}`,
   });
 }));
