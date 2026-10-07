@@ -8,6 +8,15 @@ Panel üç aşamadan oluşur:
 | 2 · Panele çekilenler | 1. aşamadan çekilenler | **Drive'a aktar** | Google Sheet'teki "Siparişler" sayfasını temizleyip seçilenleri yazar, e-posta gönderir · Shopify: `drive'a aktarıldı - otomatik` etiketi · Trendyol/Hepsiburada: sistem kaydına alınır |
 | 3 · Etiket oluşturulanlar | Drive'a aktarılanlar (tarih aralığıyla) | **Excel indir** | Hiçbir şeyi değiştirmez |
 
+**Shopify adres kontrolü** ("Panele çek" sırasında, her sipariş için):
+- İl ve ilçe geçerli mi, ilçe o ile mi ait, adreste yazan mahalle o ilçede gerçekten var mı kontrol edilir.
+- Adreste mahalle yoksa sokak + ilçe + il ile haritada aranır; bulunan mahalle o ilçenin resmi
+  listesinde varsa adresin başına "X Mah." olarak eklenir.
+- Adres satırının başında/sonunda tekrar yazılmış il ve ilçe adları silinir (bunlar zaten ayrı alanlardan geliyor).
+- Değişiklik yapılan siparişlere `adres düzeltildi - otomatik` etiketi eklenir; 2. sekmede yeşil not olarak görünür.
+- Mahalle bulunamayan ya da il/ilçe/mahalle uyuşmayan adresler 2. sekmede kırmızı görünür, sebebi altında yazar.
+- Mahalle listesi: `turkey-neighbourhoods` paketi. Harita: `GOOGLE_MAPS_API_KEY` varsa Google Maps, yoksa OpenStreetMap.
+
 Her sekmede siparişler tek satırdır; SKU'lar alt alta yazılır, siparişten çıkarılmış ya da
 değiştirilmiş ürünler listelenmez. Adres ve Shopify etiketleri (notlarınız) da görünür.
 Her sekmede "Excel indir" ile seçilenleri durum değiştirmeden Excel olarak alabilirsiniz.

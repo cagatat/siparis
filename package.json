@@ -4,10 +4,15 @@
   "private": true,
   "description": "Esse Jeffe günlük operasyon otomasyonları",
   "main": "index.js",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node index.js" },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "exceljs": "^4.4.0",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "turkey-neighbourhoods": "^4.0.3"
   }
 }

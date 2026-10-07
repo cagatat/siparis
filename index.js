@@ -28,7 +28,13 @@ const config = (() => {
         panel: env('SHOPIFY_ETIKET_PANEL', 'etiket oluşturuldu - otomatik'),   // 2. aşama
         drive: env('SHOPIFY_ETIKET_DRIVE', "drive'a aktarıldı - otomatik"),   // 3. aşama
         eski: env('SHOPIFY_ETIKET', 'etiketi çıkarıldı - otomatik'),          // önceki sürüm; 3. aşama sayılır
+        adres: env('SHOPIFY_ETIKET_ADRES', 'adres düzeltildi - otomatik'),    // adres kontrolü değişiklik yaptıysa
       },
+    },
+    // Adres kontrolü: Google Maps anahtarı varsa o, yoksa OpenStreetMap kullanılır.
+    adres: {
+      googleKey: env('GOOGLE_MAPS_API_KEY'),
+      email: env('ADRES_EMAIL') || env('MAIL_TO').split(',')[0].trim(),
     },
     trendyol: {
       sellerId: env('TRENDYOL_SELLER_ID'),
@@ -102,7 +108,8 @@ const shopify = (() => {
   // Kargo anahtarı = siparişin uzun sistem ID'si (legacyResourceId).
   const cfg = config.shopify;
   const T = cfg.tags;
-  const OURS = [T.panel, T.drive, T.eski];
+  const OURS = [T.panel, T.drive, T.eski];        // aşama etiketleri
+  const HIDDEN = [...OURS, T.adres];                // Etiketler kolonunda gösterilmeyenler
   const { httpJson, toNumber, toDate } = util;
 
   let cachedToken = null;
@@ -146,7 +153,7 @@ const shopify = (() => {
         id legacyResourceId name createdAt cancelledAt tags
         displayFulfillmentStatus paymentGatewayNames phone
         customer { firstName lastName }
-        shippingAddress { name phone address1 address2 city province zip }
+        shippingAddress { name firstName lastName company phone address1 address2 city province provinceCode zip countryCodeV2 }
         lineItems(first: 50) {
           nodes {
             title sku quantity currentQuantity unfulfilledQuantity
@@ -155,6 +162,11 @@ const shopify = (() => {
         }
       }
     }
+  }`;
+
+  const ORDER_UPDATE = `
+  mutation OrderUpdate($input: OrderInput!) {
+    orderUpdate(input: $input) { userErrors { field message } }
   }`;
 
   const TAGS_ADD = `
@@ -219,6 +231,8 @@ const shopify = (() => {
         if (!inStage(stage, tags)) continue;
         if (stage === 'yeni' && o.cancelledAt) continue;
         const customer = o.shippingAddress?.name || [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ');
+        // Adres kontrolü (sadece okuma; düzeltme "Panele çek" sırasında yapılır)
+        const ak = stage === 'drive' ? null : await adres.check(o.shippingAddress);
         for (const li of o.lineItems.nodes) {
           // currentQuantity: siparişten çıkarılan / değiştirilen ürünlerde 0 olur.
           const current = li.currentQuantity ?? li.quantity;
@@ -227,7 +241,7 @@ const shopify = (() => {
           const unit = toNumber(li.originalUnitPriceSet?.shopMoney?.amount);
           rows.push({
             _key: o.id,
-            _ref: { gid: o.id },
+            _ref: { gid: o.id, address: o.shippingAddress },
             kanal: 'Shopify',
             siparisNo: o.name,
             tarih: toDate(o.createdAt),
@@ -242,7 +256,10 @@ const shopify = (() => {
             tutar: unit != null ? unit * qty : null,
             odemeTipi: (o.paymentGatewayNames || []).join(', '),
             durum: o.cancelledAt ? 'İptal' : (DURUM[o.displayFulfillmentStatus] || o.displayFulfillmentStatus),
-            etiketler: tags.filter((t) => !OURS.includes(t)).join(', '),
+            etiketler: tags.filter((t) => !HIDDEN.includes(t)).join(', '),
+            adresDurum: ak ? ak.durum : '',
+            adresNot: ak ? ak.notlar.join(' · ') : '',
+            adresDuzeltildi: tags.includes(T.adres),
           });
         }
       }
@@ -268,8 +285,42 @@ const shopify = (() => {
     return { done, failed };
   }
 
-  // 1 → 2: panele çek
-  const advance = (orders) => addTag(orders, T.panel);
+  // Adres kontrolü + düzeltme. Döner: 'duzeltildi' | 'tamam' | 'sorunlu'
+  async function fixAddress(o) {
+    const a = o.rows[0]._ref.address;
+    const r = await adres.check(a, { full: true });
+    if (r.degisiklik) {
+      const input = {
+        id: o.rows[0]._ref.gid,
+        shippingAddress: {
+          firstName: a.firstName, lastName: a.lastName, company: a.company, phone: a.phone,
+          address1: r.degisiklik.address1, address2: r.degisiklik.address2 || null,
+          city: a.city, provinceCode: a.provinceCode, zip: a.zip, countryCode: a.countryCodeV2 || 'TR',
+        },
+      };
+      const res = await gql(ORDER_UPDATE, { input });
+      const errs = res.orderUpdate.userErrors;
+      if (errs.length) throw new Error('adres güncellenemedi: ' + errs.map((e) => e.message).join(', '));
+      await gql(TAGS_ADD, { id: input.id, tags: [T.adres] });
+    }
+    return { sonuc: r.durum === 'sorunlu' ? 'sorunlu' : r.degisiklik ? 'duzeltildi' : 'tamam', notlar: r.notlar };
+  }
+
+  // 1 → 2: adresleri kontrol et / düzelt, sonra panele çek etiketi ekle
+  async function advance(orders) {
+    const adresSonuc = { duzeltildi: [], sorunlu: [], hata: [] };
+    for (const o of orders) {
+      try {
+        const r = await fixAddress(o);
+        if (r.sonuc === 'duzeltildi') adresSonuc.duzeltildi.push(o.siparisNo);
+        if (r.sonuc === 'sorunlu') adresSonuc.sorunlu.push(`${o.siparisNo}: ${r.notlar.join(' · ')}`);
+      } catch (e) {
+        adresSonuc.hata.push(`${o.siparisNo} (${e.message})`);
+      }
+    }
+    const res = await addTag(orders, T.panel);
+    return { ...res, adres: adresSonuc };
+  }
   // 2 → 3: Drive'a aktarıldı
   const markExported = (orders) => addTag(orders, T.drive);
 
@@ -536,6 +587,202 @@ const store = (() => {
 })();
 
 // ======================================================================
+// ADRES KONTROLÜ (mahalle / ilçe / il)
+// ======================================================================
+const adres = (() => {
+  // Shopify adres kontrolü:
+  //  • il (provinceCode/province) ve ilçe (city) geçerli mi, ilçe o ile mi ait?
+  //  • adres satırında mahalle var mı, varsa o ilçede gerçekten var mı?
+  //  • mahalle yoksa sokak + ilçe + il ile haritada aranır, bulunursa adresin başına eklenir
+  //  • adres satırının başında/sonunda tekrar yazılmış il ve ilçe adları temizlenir
+  // Mahalle listesi: turkey-neighbourhoods paketi (il → ilçe → mahalle).
+  const tn = require('turkey-neighbourhoods');
+  const cfg = config.adres;
+
+  // Türkçe karakterleri düzleyip küçük harfe çevirir; karakter sayısı korunur (1:1).
+  const MAP = { 'ç': 'c', 'Ç': 'c', 'ğ': 'g', 'Ğ': 'g', 'ı': 'i', 'I': 'i', 'İ': 'i', 'ö': 'o', 'Ö': 'o', 'ş': 's', 'Ş': 's', 'ü': 'u', 'Ü': 'u', 'â': 'a', 'Â': 'a', 'î': 'i', 'Î': 'i', 'û': 'u', 'Û': 'u' };
+  const fold = (s) => String(s || '').split('').map((c) => MAP[c] ?? c.toLowerCase()).join('');
+  const key = (s) => fold(s).replace(/[^a-z0-9]/g, '');
+  const SUFFIX = /\b(mahallesi|mahalle|mah|mh)\b\.?/g;
+  const baseKey = (s) => key(fold(s).replace(SUFFIX, ' '));
+
+  function lev(a, b) {
+    if (Math.abs(a.length - b.length) > 2) return 99;
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    return d[a.length][b.length];
+  }
+
+  // Tam eşleşme; yoksa tek bir yakın eşleşme (yazım hatası) kabul edilir.
+  function bestMatch(k, list, getKey) {
+    if (!k) return null;
+    const exact = list.filter((x) => getKey(x) === k);
+    if (exact.length === 1) return exact[0];
+    if (k.length < 5) return null;
+    const near = list.filter((x) => lev(getKey(x), k) <= (k.length >= 9 ? 2 : 1));
+    return near.length === 1 ? near[0] : null;
+  }
+
+  const cityCodes = Object.keys(tn.cityNamesByCode);
+
+  function findIl(a) {
+    const m = /^TR-?(\d{2})$/i.exec(a.provinceCode || '');
+    if (m && tn.cityNamesByCode[m[1]]) return m[1];
+    return bestMatch(key(a.province), cityCodes, (c) => key(tn.cityNamesByCode[c]));
+  }
+
+  const findIlce = (ilKod, text) => bestMatch(key(text), tn.getDistrictsByCityCode(ilKod), key);
+
+  const mahalleler = (ilKod, ilce) => tn.getNeighbourhoodsByCityCodeAndDistrict(ilKod, ilce) || [];
+  const mahAdi = (m) => m.replace(/\s+Mah\.?$/i, '');
+
+  // Adres metninde mahalle arar: önce "X Mah./Mahallesi/Mh." kalıbı, sonra son ekiz geçen mahalle adı.
+  function findMahalle(text, list) {
+    const f = fold(text);
+    // 1) son ekli kalıp: ekten önceki 1-4 kelimeyi uzundan kısaya dene
+    const re = /\b(mahallesi|mahalle|mah|mh)\b\.?/g;
+    let m;
+    const written = [];
+    while ((m = re.exec(f))) {
+      const words = f.slice(0, m.index).replace(/[^a-z0-9\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
+      for (let n = Math.min(4, words.length); n >= 1; n--) {
+        const cand = words.slice(-n).join('');
+        const hit = bestMatch(cand, list, baseKey);
+        if (hit) return { mahalle: hit, yazili: true };
+      }
+      written.push(String(text).slice(0, m.index).replace(/[^\p{L}\p{N}\s]/gu, ' ').trim().split(/\s+/).slice(-2).join(' '));
+    }
+    if (written.length) return { mahalle: null, yazili: true, yanlis: written[0] };
+    // 2) ekiz yazılmış mahalle adı (cadde/sokak adı değilse)
+    const words = f.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+    let best = null;
+    for (const mh of list) {
+      const parts = fold(mahAdi(mh)).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+      for (let i = 0; i + parts.length <= words.length; i++) {
+        if (parts.every((p, j) => words[i + j] === p)) {
+          const next = words[i + parts.length] || '';
+          if (/^(cad|cd|caddesi|sok|sk|sokak|sokagi|blv|bulv|bulvari|bulvar|yolu|meydani|sitesi|apt)/.test(next)) continue;
+          if (!best || parts.length > best.n) best = { mh, n: parts.length };
+        }
+      }
+    }
+    return best ? { mahalle: best.mh, yazili: false } : { mahalle: null, yazili: false };
+  }
+
+  // Satırın başında/sonunda tekrar yazılmış il, ilçe, Türkiye adlarını temizler.
+  function cleanLine(line, names) {
+    let s = String(line || '').trim();
+    const drop = new Set(names.map(key).concat(['turkiye', 'turkey']));
+    const SEP = '[\\s,/\\\\\\-–.()]';
+    for (let i = 0; i < 6; i++) {
+      const before = s;
+      const end = new RegExp(`${SEP}*([^\\s,/\\\\\\-–()]+)${SEP}*$`).exec(s);
+      if (end && drop.has(key(end[1])) && s.slice(0, end.index).trim()) s = s.slice(0, end.index).trim();
+      const start = new RegExp(`^${SEP}*([^\\s,/\\\\\\-–()]+)${SEP}+`).exec(s);
+      if (start && drop.has(key(start[1]))) {
+        const rest = s.slice(start[0].length);
+        if (rest.trim() && !/^(cad|cd|caddesi|sok|sk|sokak|blv|bulv|bulvar|yolu)/.test(fold(rest))) s = rest.trim();
+      }
+      if (s === before) break;
+    }
+    return s.replace(/\s{2,}/g, ' ').replace(/[\s,/-]+$/, '').trim();
+  }
+
+  // Sokak bilgisini sadeleştirir (kapı/daire no gibi aramayı bozan kısımlar atılır).
+  const streetOnly = (s) => s.replace(/\b(no|kapi|daire|d|kat|k|blok|apt|apartmani|site|sitesi)\b\s*[:.]?\s*[\w/-]*/gi, ' ').replace(/\s{2,}/g, ' ').trim();
+
+  let lastNominatim = 0;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Haritada arar; bulunan mahalle o ilçenin listesinde varsa döner.
+  async function geocode(street, ilce, ilAd, list) {
+    const names = [];
+    try {
+      if (cfg.googleKey) {
+        const url = 'https://maps.googleapis.com/maps/api/geocode/json?language=tr&region=tr' +
+          `&address=${encodeURIComponent(`${street}, ${ilce}, ${ilAd}, Türkiye`)}` +
+          `&components=${encodeURIComponent(`country:TR|administrative_area:${ilAd}`)}&key=${cfg.googleKey}`;
+        const d = await util.httpJson(url, {}, 'Google Maps');
+        for (const r of (d.results || []).slice(0, 3)) names.push((r.address_components || []).map((c) => c.long_name));
+      } else {
+        const wait = 1100 - (Date.now() - lastNominatim);
+        if (wait > 0) await sleep(wait); // OpenStreetMap kuralı: saniyede en fazla 1 istek
+        lastNominatim = Date.now();
+        const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&countrycodes=tr&limit=3' +
+          `&q=${encodeURIComponent(`${street}, ${ilce}, ${ilAd}`)}` + (cfg.email ? `&email=${encodeURIComponent(cfg.email)}` : '');
+        const d = await util.httpJson(url, { headers: { 'User-Agent': 'esse-jeffe-otomasyon/1.0', 'Accept-Language': 'tr' } }, 'OpenStreetMap');
+        for (const r of d || []) names.push(Object.values(r.address || {}).map(String));
+      }
+    } catch (e) {
+      console.error('[adres] harita araması:', e.message);
+      return null;
+    }
+    const found = new Set();
+    for (const comps of names) {
+      if (!comps.some((c) => key(c) === key(ilce))) continue; // başka ilçeye düşen sonuçları alma
+      for (const c of comps) {
+        const hit = list.find((m) => baseKey(m) === baseKey(c));
+        if (hit) found.add(hit);
+      }
+    }
+    return found.size === 1 ? [...found][0] : null;
+  }
+
+  // a: Shopify shippingAddress. full=false: sadece kontrol (haritaya gitmez, değiştirmez).
+  async function check(a, { full = false } = {}) {
+    if (!a) return { durum: 'sorunlu', notlar: ['Teslimat adresi yok'] };
+    const notlar = [];
+    const ilKod = findIl(a);
+    if (!ilKod) return { durum: 'sorunlu', notlar: [`İl tanınamadı (${a.province || 'boş'})`] };
+    const ilAd = tn.cityNamesByCode[ilKod];
+    const metin = [a.address1, a.address2].filter(Boolean).join(' ');
+
+    let ilce = findIlce(ilKod, a.city);
+    if (!ilce) {
+      // ilçe alanı hatalıysa adres metninde ilçe adı arıyoruz
+      const words = fold(metin).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/);
+      ilce = tn.getDistrictsByCityCode(ilKod).find((d) => words.includes(key(d)));
+      notlar.push(ilce ? `İlçe alanı "${a.city || 'boş'}" ${ilAd} iline ait değil (adreste ${ilce} geçiyor)`
+                       : `İlçe "${a.city || 'boş'}" ${ilAd} ilinde bulunamadı`);
+      if (!ilce) return { durum: 'sorunlu', notlar, ilAd };
+    }
+
+    const list = mahalleler(ilKod, ilce);
+    const bulunan = findMahalle(metin, list);
+
+    // il/ilçe tekrarlarını temizle
+    let address1 = cleanLine(a.address1, [ilAd, ilce]);
+    let address2 = cleanLine(a.address2, [ilAd, ilce]);
+    let mahalle = bulunan.mahalle;
+    let eklendi = false;
+
+    if (!mahalle && bulunan.yanlis) {
+      notlar.push(`"${bulunan.yanlis}" mahallesi ${ilce} / ${ilAd} içinde bulunamadı`);
+    } else if (!mahalle && full) {
+      const street = streetOnly(cleanLine(metin, [ilAd, ilce]));
+      mahalle = street ? await geocode(street, ilce, ilAd, list) : null;
+      if (mahalle) {
+        address1 = `${mahAdi(mahalle)} Mah. ${address1}`.trim();
+        eklendi = true;
+      }
+    }
+    if (!mahalle && !bulunan.yanlis) notlar.push('Adreste mahalle yok' + (full ? ', haritada da bulunamadı' : ''));
+
+    const degisti = address1 !== String(a.address1 || '').trim() || address2 !== String(a.address2 || '').trim();
+    return {
+      durum: notlar.length ? 'sorunlu' : 'tamam',
+      notlar, ilAd, ilce, mahalle, eklendi,
+      degisiklik: degisti ? { address1, address2 } : null,
+    };
+  }
+
+  return { check, fold, key };
+})();
+
+// ======================================================================
 // EXCEL
 // ======================================================================
 const excel = (() => {
@@ -787,6 +1034,7 @@ const flow = (() => {
           key: r._key, kanal: r.kanal, siparisNo: r.siparisNo, tarih: r.tarih, musteri: r.musteri,
           telefon: r.telefon, adres: r.adres || '', kargoFirmasi: r.kargoFirmasi, kargoAnahtari: r.kargoAnahtari,
           odemeTipi: r.odemeTipi, durum: r.durum, etiketler: r.etiketler || '',
+          adresDurum: r.adresDurum || '', adresNot: r.adresNot || '', adresDuzeltildi: !!r.adresDuzeltildi,
           tutar: 0, adet: 0, skus: [], rows: [],
         });
       }
@@ -844,13 +1092,15 @@ const flow = (() => {
     const { s, selected } = take(sessionId, keys, 'yeni');
     const summary = {};
     const failed = [];
+    let adresSonuc = null;
     for (const [kanal, orders] of Object.entries(byChannel(selected))) {
       const res = await byName[kanal].advance(orders);
       summary[kanal] = res.done.length;
       failed.push(...res.failed.map((f) => `${kanal} ${f}`));
       res.done.forEach((k) => s.orders.delete(k));
+      if (res.adres) adresSonuc = res.adres;
     }
-    return { summary, failed, done: Object.values(summary).reduce((a, b) => a + b, 0) };
+    return { summary, failed, adres: adresSonuc, done: Object.values(summary).reduce((a, b) => a + b, 0) };
   }
 
   function fileName(prefix) {
@@ -951,6 +1201,9 @@ const PAGE = `<!doctype html>
   td.num{text-align:right;white-space:nowrap}
   td.nowrap{white-space:nowrap}
   td.addr{min-width:240px;max-width:340px}
+  td.addr.bad{background:#fde8e8 !important;color:#8a1020;box-shadow:inset 3px 0 0 #c62828}
+  .anote{display:block;margin-top:4px;font-size:12.5px;font-weight:600}
+  .afix{display:block;margin-top:4px;font-size:12.5px;color:var(--ok)}
   .sku{display:block;font-family:ui-monospace,Menlo,monospace;font-size:14px;white-space:nowrap}
   .mono{font-family:ui-monospace,Menlo,monospace;font-size:14px}
   .tags{color:#5b4a4f;min-width:200px}
@@ -992,7 +1245,7 @@ const PAGE = `<!doctype html>
 <script>
 const COLS = 13;
 const STAGES = {
-  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
+  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da önce adresler kontrol edilir (mahalle yoksa haritada aranıp eklenir, tekrar yazılan il/ilçe silinir), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
   panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": Google Sheet\\'teki "Siparişler" sayfası temizlenir, seçilenler yazılır ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
   drive: { action: null, hint: 'Drive\\'a aktarılmış siparişler (sipariş tarihine göre). Bu sekmede hiçbir siparişin durumu değişmez.' },
 };
@@ -1034,6 +1287,13 @@ function update() {
 }
 $('all').onchange = (e) => { document.querySelectorAll('.pick').forEach((c) => c.checked = e.target.checked); update(); };
 
+function addrCell(o) {
+  const bad = stage === 'panel' && o.adresDurum === 'sorunlu';
+  return '<td class="addr' + (bad ? ' bad' : '') + '"' + (bad ? ' title="' + esc(o.adresNot) + '"' : '') + '>' + esc(o.adres) +
+    (bad ? '<span class="anote">⚠ ' + esc(o.adresNot) + '</span>' : '') +
+    (stage !== 'yeni' && o.adresDuzeltildi ? '<span class="afix">✓ adres otomatik düzeltildi</span>' : '') + '</td>';
+}
+
 function render() {
   if (stage !== 'drive') $('n-' + stage).textContent = orders.length;
   if (!orders.length) {
@@ -1043,7 +1303,7 @@ function render() {
   $('rows').innerHTML = orders.map((o) =>
     '<tr><td><input type="checkbox" class="pick" value="' + esc(o.key) + '" checked></td>' +
     '<td>' + esc(o.kanal) + '</td><td class="nowrap"><b>' + esc(o.siparisNo) + '</b></td><td class="nowrap">' + when(o.tarih) + '</td>' +
-    '<td>' + esc(o.musteri) + '</td><td class="nowrap">' + esc(o.telefon) + '</td><td class="addr">' + esc(o.adres) + '</td>' +
+    '<td>' + esc(o.musteri) + '</td><td class="nowrap">' + esc(o.telefon) + '</td>' + addrCell(o) +
     '<td>' + o.skus.map((x) => '<span class="sku">' + esc(x.sku) + (x.adet > 1 ? ' ×' + esc(x.adet) : '') + '</span>').join('') + '</td>' +
     '<td class="num">' + money(o.tutar) + '</td><td>' + esc(o.odemeTipi) + '</td>' +
     '<td class="mono">' + esc(o.kargoAnahtari) + '</td><td>' + esc(o.durum) + '</td><td class="tags">' + esc(o.etiketler) + '</td></tr>'
@@ -1088,7 +1348,11 @@ $('action').onclick = async () => {
     if (stage === 'yeni') {
       const d = await post('/api/panele-cek', { sessionId: session, keys });
       const parts = Object.entries(d.summary).map(([k, v]) => k + ': ' + v);
-      $('msg').innerHTML = '<span class="ok">' + d.done + ' sipariş panele çekildi.</span> ' + esc(parts.join(' · ')) + warnHtml(d.failed);
+      const a = d.adres;
+      const adresHtml = a ? '<br>Adres kontrolü: ' + a.duzeltildi.length + ' adres düzeltildi' +
+        (a.sorunlu.length ? ', <span class="warn">' + a.sorunlu.length + ' adreste sorun var (2. sekmede kırmızı)</span>' : '') +
+        warnHtml(a.hata.map((x) => 'Adres güncellenemedi: ' + x)) : '';
+      $('msg').innerHTML = '<span class="ok">' + d.done + ' sipariş panele çekildi.</span> ' + esc(parts.join(' · ')) + adresHtml + warnHtml(d.failed);
     } else {
       const d = await post('/api/drive', { sessionId: session, keys, email: $('mail').checked });
       $('msg').innerHTML = '<span class="ok">' + d.orderCount + " sipariş Drive'a aktarıldı.</span> " + mailText(d.mail) + warnHtml(d.warnings) +
