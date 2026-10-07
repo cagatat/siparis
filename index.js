@@ -610,10 +610,10 @@ const excel = (() => {
 })();
 
 // ======================================================================
-// GOOGLE SHEETS (tek sayfa; yeni aktarımlar en üste eklenir)
+// GOOGLE SHEETS (tek sayfa; her aktarımda sayfa yenilenir)
 // ======================================================================
 const sheets = (() => {
-  // Tek sayfa: her aktarımda yeni siparişler başlığın hemen altına eklenir (en yeni en üstte).
+  // Tek sayfa: her aktarımda başlık dışındaki tüm kayıtlar silinir, seçilen siparişler 2. satırdan itibaren yazılır.
   const cfg = config.google;
   const API = 'https://sheets.googleapis.com/v4/spreadsheets';
   const TAB = config.google.tab;
@@ -709,18 +709,16 @@ const sheets = (() => {
     });
     const n = values.length;
 
-    // Başlığın altına n boş satır aç, yeni siparişleri oraya yaz.
+    // Başlık hariç tüm eski kayıtları sil, seçilenleri 2. satırdan itibaren yaz.
     try {
-      await api(':batchUpdate', 'POST', { requests: [
-        { insertDimension: { range: { sheetId: gid, dimension: 'ROWS', startIndex: 1, endIndex: 1 + n }, inheritFromBefore: false } },
-        fmt(gid, 1, 1 + n, false),
-      ] });
+      await api(`/values/${range('A2:ZZ')}:clear`, 'POST', {});
     } catch (e) {
-      tabId = null;
+      tabId = null; // sayfa silinmiş olabilir; bir sonraki denemede yeniden bakılır
       throw e;
     }
     // RAW: uzun ID'ler ve telefonlar sayıya dönüşmeden metin olarak kalır.
     await api(`/values/${range('A2')}?valueInputOption=RAW`, 'PUT', { values });
+    await api(':batchUpdate', 'POST', { requests: [fmt(gid, 1, 1 + n, false)] });
 
     return { url: `https://docs.google.com/spreadsheets/d/${cfg.sheetId}/edit#gid=${gid}`, title: TAB };
   }
@@ -995,7 +993,7 @@ const PAGE = `<!doctype html>
 const COLS = 13;
 const STAGES = {
   yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
-  panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": seçilenler Google Sheet\\'teki "Siparişler" sayfasının en üstüne eklenir ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
+  panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": Google Sheet\\'teki "Siparişler" sayfası temizlenir, seçilenler yazılır ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
   drive: { action: null, hint: 'Drive\\'a aktarılmış siparişler (sipariş tarihine göre). Bu sekmede hiçbir siparişin durumu değişmez.' },
 };
 let stage = 'yeni', session = null, orders = [];
@@ -1077,11 +1075,6 @@ async function load() {
 }
 $('fetch').onclick = load;
 
-function countBy(keys) {
-  const c = {};
-  orders.filter((o) => keys.includes(o.key)).forEach((o) => c[o.kanal] = (c[o.kanal] || 0) + 1);
-  return c;
-}
 function busy(btn, on) { btn.disabled = on; if (on) btn.textContent = 'İşleniyor…'; else update(); }
 function mailText(m) {
   if (!m) return '';
@@ -1090,12 +1083,6 @@ function mailText(m) {
 
 $('action').onclick = async () => {
   const keys = selected();
-  const c = countBy(keys);
-  const what = { Shopify: 'etiketlenecek', Trendyol: '"İşleme Alındı" yapılacak', Hepsiburada: 'paketlenip "Gönderime Hazır"a geçecek' };
-  const text = stage === 'yeni'
-    ? 'Panele çekilecek:\\n' + Object.entries(c).map(([k, v]) => '• ' + k + ': ' + v + ' sipariş ' + what[k]).join('\\n') + '\\n\\nTrendyol ve Hepsiburada işlemleri geri alınamaz. Devam edilsin mi?'
-    : keys.length + " sipariş Google Sheet'e yazılacak ve 3. aşamaya geçecek. Devam edilsin mi?";
-  if (!confirm(text)) return;
   busy($('action'), true);
   try {
     if (stage === 'yeni') {
