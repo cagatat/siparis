@@ -5,7 +5,7 @@ Panel üç aşamadan oluşur:
 | Aşama | Ne var | Buton | Butonun yaptığı |
 |---|---|---|---|
 | 1 · Yeni gelen siparişler | Hiç dokunulmamış siparişler | **Panele çek** | Shopify: `etiket oluşturuldu - otomatik` etiketi · Trendyol: "İşleme Alındı" · Hepsiburada: paketlenip "Gönderime Hazır" |
-| 2 · Panele çekilenler | 1. aşamadan çekilenler | **Drive'a aktar** | Google Sheet'e yeni sekme olarak yazar, e-posta gönderir · Shopify: `drive'a aktarıldı - otomatik` etiketi · Trendyol/Hepsiburada: sistem kaydına alınır |
+| 2 · Panele çekilenler | 1. aşamadan çekilenler | **Drive'a aktar** | Google Sheet'teki tek sayfanın ("Siparişler") en üstüne ekler, e-posta gönderir · Shopify: `drive'a aktarıldı - otomatik` etiketi · Trendyol/Hepsiburada: sistem kaydına alınır |
 | 3 · Etiket oluşturulanlar | Drive'a aktarılanlar (tarih aralığıyla) | **Excel indir** | Hiçbir şeyi değiştirmez |
 
 Her sekmede siparişler tek satırdır; SKU'lar alt alta yazılır, siparişten çıkarılmış ya da

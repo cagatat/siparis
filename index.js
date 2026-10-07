@@ -45,6 +45,7 @@ const config = (() => {
     google: {
       sheetId: env('GOOGLE_SHEET_ID'),
       serviceAccount: env('GOOGLE_SERVICE_ACCOUNT_JSON'),
+      tab: env('GOOGLE_SHEET_SAYFA', 'Siparişler'),   // tüm aktarımların yazıldığı tek sayfa
     },
     mail: {
       resendKey: env('RESEND_API_KEY'),
@@ -609,12 +610,15 @@ const excel = (() => {
 })();
 
 // ======================================================================
-// GOOGLE SHEETS (her aktarım tablonun başına yeni sekme olarak eklenir)
+// GOOGLE SHEETS (tek sayfa; yeni aktarımlar en üste eklenir)
 // ======================================================================
 const sheets = (() => {
+  // Tek sayfa: her aktarımda yeni siparişler başlığın hemen altına eklenir (en yeni en üstte).
   const cfg = config.google;
   const API = 'https://sheets.googleapis.com/v4/spreadsheets';
+  const TAB = config.google.tab;
   let cached = null; // { token, expiresAt }
+  let tabId = null;
 
   const b64url = (v) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
 
@@ -637,7 +641,7 @@ const sheets = (() => {
     return cached.token;
   }
 
-  async function api(path, method, body) {
+  async function api(path, method = 'GET', body) {
     const token = await getToken();
     return util.httpJson(`${API}/${cfg.sheetId}${path}`, {
       method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -645,48 +649,80 @@ const sheets = (() => {
     }, 'Google Sheets');
   }
 
-  function tabTitle(prefix) {
-    const t = new Date().toLocaleString('tr-TR', {
-      timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
-    });
-    return `${prefix} ${t}`.replace(/[\[\]:*?\/\\]/g, '.');
+  // Sheet kolonları: Excel kolonlarının önüne "Aktarım" (aktarım tarihi-saati) eklenir.
+  const columns = () => [{ header: 'Aktarım', key: 'aktarim', width: 16 }, ...excel.COLUMNS];
+  const range = (a1) => encodeURIComponent(`'${TAB.replace(/'/g, "''")}'!${a1}`);
+
+  const fmt = (gid, start, end, header) => ({
+    repeatCell: {
+      range: { sheetId: gid, startRowIndex: start, endRowIndex: end, startColumnIndex: 0, endColumnIndex: columns().length },
+      cell: { userEnteredFormat: header
+        ? { textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } }, backgroundColor: { red: 0.231, green: 0.165, blue: 0.184 }, wrapStrategy: 'CLIP', verticalAlignment: 'MIDDLE' }
+        : { textFormat: { bold: false, foregroundColor: { red: 0, green: 0, blue: 0 } }, backgroundColor: { red: 1, green: 1, blue: 1 }, wrapStrategy: 'WRAP', verticalAlignment: 'TOP' } },
+      fields: 'userEnteredFormat(textFormat,backgroundColor,wrapStrategy,verticalAlignment)',
+    },
+  });
+
+  // Sayfa yoksa oluşturur, başlık satırını yazar. Sayfanın sheetId'sini döner.
+  async function ensureTab() {
+    if (tabId != null) return tabId;
+    const meta = await api('?fields=sheets.properties(sheetId,title)');
+    const found = (meta.sheets || []).find((s) => s.properties.title === TAB);
+    if (found) {
+      tabId = found.properties.sheetId;
+      const head = await api(`/values/${range('A1:A1')}`);
+      if (head.values && head.values.length) return tabId;
+    } else {
+      const added = await api(':batchUpdate', 'POST', {
+        requests: [{ addSheet: { properties: { title: TAB, index: 0, gridProperties: { frozenRowCount: 1 } } } }],
+      });
+      tabId = added.replies[0].addSheet.properties.sheetId;
+    }
+    const cols = columns();
+    await api(`/values/${range('A1')}?valueInputOption=RAW`, 'PUT', { values: [cols.map((c) => c.header)] });
+    await api(':batchUpdate', 'POST', { requests: [
+      fmt(tabId, 0, 1, true),
+      { updateSheetProperties: { properties: { sheetId: tabId, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' } },
+      ...cols.map((c, i) => ({ updateDimensionProperties: {
+        range: { sheetId: tabId, dimension: 'COLUMNS', startIndex: i, endIndex: i + 1 },
+        properties: { pixelSize: Math.round(c.width * 8) }, fields: 'pixelSize' } })),
+    ] });
+    return tabId;
   }
 
-  async function writeOrders(orders, prefix) {
+  async function writeOrders(orders) {
     if (!cfg.sheetId || !cfg.serviceAccount) return { skipped: true };
-    const title = tabTitle(prefix);
-    const cols = excel.COLUMNS;
-
-    const added = await api(':batchUpdate', 'POST', {
-      requests: [{ addSheet: { properties: { title, index: 0, gridProperties: { frozenRowCount: 1 } } } }],
+    let gid;
+    try {
+      gid = await ensureTab();
+    } catch (e) {
+      tabId = null; // sayfa silinmiş olabilir; bir sonraki denemede yeniden bakılır
+      throw e;
+    }
+    const cols = columns();
+    const stamp = new Date().toLocaleString('tr-TR', {
+      timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
     });
-    const gid = added.replies[0].addSheet.properties.sheetId;
-
-    const values = [cols.map((c) => c.header), ...orders.map((o) => {
-      const r = excel.toRecord(o);
+    const values = orders.map((o) => {
+      const r = { aktarim: stamp, ...excel.toRecord(o) };
       return cols.map((c) => r[c.key] ?? '');
-    })];
-    const range = encodeURIComponent(`'${title.replace(/'/g, "''")}'!A1`);
+    });
+    const n = values.length;
+
+    // Başlığın altına n boş satır aç, yeni siparişleri oraya yaz.
+    try {
+      await api(':batchUpdate', 'POST', { requests: [
+        { insertDimension: { range: { sheetId: gid, dimension: 'ROWS', startIndex: 1, endIndex: 1 + n }, inheritFromBefore: false } },
+        fmt(gid, 1, 1 + n, false),
+      ] });
+    } catch (e) {
+      tabId = null;
+      throw e;
+    }
     // RAW: uzun ID'ler ve telefonlar sayıya dönüşmeden metin olarak kalır.
-    await api(`/values/${range}?valueInputOption=RAW`, 'PUT', { values });
+    await api(`/values/${range('A2')}?valueInputOption=RAW`, 'PUT', { values });
 
-    const n = cols.length;
-    await api(':batchUpdate', 'POST', { requests: [
-      { repeatCell: {
-          range: { sheetId: gid, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: n },
-          cell: { userEnteredFormat: { textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
-                  backgroundColor: { red: 0.231, green: 0.165, blue: 0.184 } } },
-          fields: 'userEnteredFormat(textFormat,backgroundColor)' } },
-      { repeatCell: {
-          range: { sheetId: gid, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: n },
-          cell: { userEnteredFormat: { wrapStrategy: 'WRAP', verticalAlignment: 'TOP' } },
-          fields: 'userEnteredFormat(wrapStrategy,verticalAlignment)' } },
-      ...cols.map((c, i) => ({ updateDimensionProperties: {
-          range: { sheetId: gid, dimension: 'COLUMNS', startIndex: i, endIndex: i + 1 },
-          properties: { pixelSize: Math.round(c.width * 8) }, fields: 'pixelSize' } })),
-    ] });
-
-    return { url: `https://docs.google.com/spreadsheets/d/${cfg.sheetId}/edit#gid=${gid}`, title };
+    return { url: `https://docs.google.com/spreadsheets/d/${cfg.sheetId}/edit#gid=${gid}`, title: TAB };
   }
 
   return { writeOrders, configured: () => !!(cfg.sheetId && cfg.serviceAccount) };
@@ -826,7 +862,7 @@ const flow = (() => {
   }
 
   async function mailList({ title, orders, buffer, filename, sheet, warnings }) {
-    const sheetLine = sheet && sheet.url ? `<p><a href="${sheet.url}">Google Sheet'te aç</a> (sekme: ${sheet.title})</p>` : '';
+    const sheetLine = sheet && sheet.url ? `<p><a href="${sheet.url}">Google Sheet'te aç</a> (sayfa: ${sheet.title})</p>` : '';
     const warn = warnings.length ? `<p style="color:#b00020"><b>Uyarı:</b><br>${warnings.join('<br>')}</p>` : '';
     try {
       return await sendMail({
@@ -848,7 +884,7 @@ const flow = (() => {
     const warnings = [];
 
     // Önce Sheet'e yazılır; yazılamazsa hiçbir sipariş 3. aşamaya geçmez.
-    const sheet = await sheets.writeOrders(selected, 'Liste');
+    const sheet = await sheets.writeOrders(selected);
 
     const groups = byChannel(selected);
     for (const [kanal, orders] of Object.entries(groups)) {
@@ -959,7 +995,7 @@ const PAGE = `<!doctype html>
 const COLS = 13;
 const STAGES = {
   yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
-  panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": seçilenler Google Sheet\\'e yeni bir sekme olarak yazılır ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
+  panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": seçilenler Google Sheet\\'teki "Siparişler" sayfasının en üstüne eklenir ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
   drive: { action: null, hint: 'Drive\\'a aktarılmış siparişler (sipariş tarihine göre). Bu sekmede hiçbir siparişin durumu değişmez.' },
 };
 let stage = 'yeni', session = null, orders = [];
