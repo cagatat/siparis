@@ -15,7 +15,12 @@ Panel üç aşamadan oluşur:
 - İl ve ilçe geçerli mi, ilçe o ile mi ait, adreste yazan mahalle o ilçede gerçekten var mı kontrol edilir.
 - Adreste mahalle yoksa sokak + ilçe + il ile haritada aranır; bulunan mahalle o ilçenin resmi
   listesinde varsa adresin başına "X Mah." olarak eklenir.
-- Adres satırının başında/sonunda tekrar yazılmış il ve ilçe adları silinir (bunlar zaten ayrı alanlardan geliyor).
+- Adres satırında tekrar yazılmış il ve ilçe adları sadece mahalle–ilçe–il uyumluysa silinir; uyumsuzluk varsa satıra dokunulmaz.
+- Adres satırı standart sıraya dizilir: `Xxx Mah. Xxx Cad. Xxx Sok. No: 3 Kat: 2 Daire: 5 Xxx Apt. Xxx Sitesi A Blok`.
+  Satırdaki her kelime bu parçalardan birine oturmuyorsa (not, tarif vb.) satır olduğu gibi bırakılır; hiçbir bilgi silinmez,
+  uydurma bilgi eklenmez. Haritadan bulunan mahalle ancak sonuç aynı sokak + aynı ilçeye düşüyorsa eklenir.
+- Okul, hastane, üniversite gibi kurum adreslerine dokunulmaz.
+- Google Maps hata verirse (faturalandırma, kota vb.) arama otomatik olarak OpenStreetMap'e geçer.
 - Değişiklik yapılan siparişlere `adres düzeltildi - otomatik` etiketi eklenir; 2. sekmede yeşil not olarak görünür.
 - Mahalle bulunamayan ya da il/ilçe/mahalle uyuşmayan adresler 2. sekmede kırmızı görünür, sebebi altında yazar.
 - Mahalle listesi: `turkey-neighbourhoods` paketi. Harita: `GOOGLE_MAPS_API_KEY` varsa Google Maps, yoksa OpenStreetMap.

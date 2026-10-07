@@ -716,33 +716,193 @@ const adres = (() => {
   let lastNominatim = 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // Haritada arar; bulunan mahalle o ilçenin listesinde varsa döner.
-  async function geocode(street, ilce, ilAd, list) {
-    const names = [];
+  // ---- Adres satırını standart biçime getirme ----------------------------------
+  // Hedef: "Xxx Mah. Xxx Cad. Xxx Sok. No: 3 Kat: 2 Daire: 5 Xxx Apt. Xxx Sitesi A Blok"
+  // Kural: satırdaki HER kelime bir parçaya oturmalı. Oturmayan tek bir kelime bile varsa
+  // (not, tarif, telefon vb.) satır biçimlendirilmez, olduğu gibi bırakılır.
+  const KURUM = /\b(okul|okulu|ilkokulu|ortaokulu|lise|lisesi|kolej|koleji|anaokulu|kres|kresi|hastane|hastanesi|saglik|polikligi|poliklinik|universite|universitesi|fakulte|fakultesi|kampus|kampusu|yurt|yurdu|cami|camii|belediye|belediyesi|karakol|karakolu|adliye|adliyesi|havalimani|avm|otel|hotel|fabrika|fabrikasi|osb|sanayi|kisla|kislasi|postane|muhtarlik|kaymakamlik|valilik|plaza|is merkezi|ishani)\b/;
+  const isKurum = (s) => KURUM.test(fold(s));
+
+  const KW = {
+    mah: ['mahallesi', 'mahalle', 'mah', 'mh'],
+    cad: ['caddesi', 'cadde', 'cad', 'cd'],
+    sok: ['sokagi', 'sokak', 'sok', 'sk'],
+    bulv: ['bulvari', 'bulvar', 'bulv', 'blv'],
+    yol: ['yolu'],
+    apt: ['apartmani', 'apartman', 'apt', 'ap'],
+    site: ['sitesi', 'site', 'evleri', 'konutlari', 'rezidans', 'residence'],
+    no: ['no', 'numara', 'nu'],
+    kat: ['kat', 'k'],
+    daire: ['daire', 'd', 'da', 'dr'],
+    blok: ['blok', 'blk'],
+  };
+  const kind = (t) => Object.keys(KW).find((k) => KW[k].includes(t)) || null;
+  const STREET = ['cad', 'sok', 'bulv', 'yol'];
+  const VALUE = /^[0-9]+[a-z]?([/-][0-9a-z]+)?$/;
+
+  // Türkçe büyük-küçük harf
+  const up = (c) => (c === 'i' ? 'İ' : c === 'ı' ? 'I' : c.toLocaleUpperCase('tr-TR'));
+  const title = (w) => {
+    const lower = w.toLocaleLowerCase('tr-TR');
+    return /^[0-9]/.test(lower) ? lower.toLocaleUpperCase('tr-TR') : up(lower[0]) + lower.slice(1);
+  };
+  const titleAll = (words) => words.map(title).join(' ');
+  const streetName = (words) => {
+    // "159" → "159." (numaralı sokak/cadde)
+    if (words.length === 1 && /^[0-9]+$/.test(words[0])) return words[0] + '.';
+    return titleAll(words);
+  };
+
+  function tokenize(line) {
+    const s = String(line || '')
+      .replace(/([.:])(?=\S)/g, '$1 ')            // "mah.159.sok" → "mah. 159. sok"
+      .replace(/\b(no|d|k|kat|daire)(?=\d)/gi, '$1 ') // "no5" → "no 5"
+      .replace(/,/g, ' ');
+    return s.split(/\s+/).filter(Boolean).map((orig) => {
+      const clean = orig.replace(/^[.:;()]+|[.:;()]+$/g, '');
+      return { orig, clean, f: fold(clean) };
+    }).filter((t) => t.clean && !/^[-/]+$/.test(t.clean));
+  }
+
+  // Ayrıştırır; her kelime bir parçaya oturmazsa null döner.
+  function parse(line) {
+    const toks = tokenize(line);
+    const p = { mah: null, streets: [], no: null, kat: null, daire: null, apt: null, site: null, blok: null };
+    let buf = [];
+    const setOnce = (k, v) => { if (p[k] != null) throw 0; p[k] = v; };
+    const valueAt = (i) => (toks[i] && VALUE.test(toks[i].f) ? toks[i].clean.toLocaleUpperCase('tr-TR') : null);
     try {
-      if (cfg.googleKey) {
-        const url = 'https://maps.googleapis.com/maps/api/geocode/json?language=tr&region=tr' +
-          `&address=${encodeURIComponent(`${street}, ${ilce}, ${ilAd}, Türkiye`)}` +
-          `&components=${encodeURIComponent(`country:TR|administrative_area:${ilAd}`)}&key=${cfg.googleKey}`;
-        const d = await util.httpJson(url, {}, 'Google Maps');
-        for (const r of (d.results || []).slice(0, 3)) names.push((r.address_components || []).map((c) => c.long_name));
-      } else {
-        const wait = 1100 - (Date.now() - lastNominatim);
-        if (wait > 0) await sleep(wait); // OpenStreetMap kuralı: saniyede en fazla 1 istek
-        lastNominatim = Date.now();
-        const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&countrycodes=tr&limit=3' +
-          `&q=${encodeURIComponent(`${street}, ${ilce}, ${ilAd}`)}` + (cfg.email ? `&email=${encodeURIComponent(cfg.email)}` : '');
-        const d = await util.httpJson(url, { headers: { 'User-Agent': 'esse-jeffe-otomasyon/1.0', 'Accept-Language': 'tr' } }, 'OpenStreetMap');
-        for (const r of d || []) names.push(Object.values(r.address || {}).map(String));
+      for (let i = 0; i < toks.length; i++) {
+        const t = toks[i];
+        // "ev no", "kapı no", "bina no", "dış kapı no", "iç kapı" önekleri
+        if (['ev', 'kapi', 'bina', 'dis', 'ic'].includes(t.f) && toks[i + 1] && ['no', 'kapi', 'numara'].includes(toks[i + 1].f) && !buf.length) {
+          const icKapi = t.f === 'ic'; // "iç kapı" = daire numarası
+          i++;
+          if (toks[i].f === 'kapi' && toks[i + 1] && ['no', 'numara'].includes(toks[i + 1].f)) i++;
+          const v = valueAt(i + 1);
+          if (!v) throw 0;
+          setOnce(icKapi ? 'daire' : 'no', v); i++;
+          continue;
+        }
+        const k = kind(t.f);
+        if (k === 'mah') { if (!buf.length) throw 0; setOnce('mah', buf); buf = []; continue; }
+        if (STREET.includes(k)) { if (!buf.length) throw 0; p.streets.push({ k, words: buf }); buf = []; continue; }
+        if (k === 'apt' || k === 'site') {
+          if (!buf.length) throw 0;
+          setOnce(k, { words: buf, kw: t.clean }); buf = []; continue;
+        }
+        if (k === 'blok') {
+          if (buf.length === 1 && /^[a-z0-9]{1,3}$/.test(fold(buf[0]))) { setOnce('blok', buf[0].toLocaleUpperCase('tr-TR')); buf = []; continue; }
+          if (!buf.length && toks[i + 1] && /^[a-z0-9]{1,3}$/.test(toks[i + 1].f)) { setOnce('blok', toks[i + 1].clean.toLocaleUpperCase('tr-TR')); i++; continue; }
+          throw 0;
+        }
+        if (k === 'no' || k === 'kat' || k === 'daire') {
+          const v = valueAt(i + 1);
+          if (buf.length || !v) {
+            // "k", "d" gibi kısa harfler isim içinde de geçebilir → kelime olarak devam
+            if (['k', 'd', 'da', 'nu'].includes(t.f) && !v) { buf.push(t.clean); continue; }
+            throw 0;
+          }
+          setOnce(k, v); i++;
+          continue;
+        }
+        buf.push(t.clean);
       }
-    } catch (e) {
-      console.error('[adres] harita araması:', e.message);
+      if (buf.length) throw 0;
+    } catch {
       return null;
     }
+    return p;
+  }
+
+  function render(p, mahalleResmi) {
+    const out = [];
+    if (mahalleResmi) out.push(`${mahAdi(mahalleResmi)} Mah.`);
+    const SUF = { cad: 'Cad.', sok: 'Sok.', bulv: 'Bulv.', yol: 'Yolu' };
+    for (const s of p.streets) out.push(`${streetName(s.words)} ${SUF[s.k]}`);
+    if (p.no) out.push(`No: ${p.no}`);
+    if (p.kat) out.push(`Kat: ${p.kat}`);
+    if (p.daire) out.push(`Daire: ${p.daire}`);
+    if (p.apt) out.push(`${titleAll(p.apt.words)} Apt.`);
+    if (p.site) {
+      const kw = ['site', 'sitesi'].includes(fold(p.site.kw)) ? 'Sitesi' : title(p.site.kw);
+      out.push(`${titleAll(p.site.words)} ${kw}`);
+    }
+    if (p.blok) out.push(`${p.blok} Blok`);
+    return out.join(' ');
+  }
+
+  // Sokak/cadde adının karşılaştırma anahtarı: "159. Sokak" → "159", "Petunya Sk." → "petunya"
+  const STREET_WORDS = /\b(sokagi|sokak|sok|sk|caddesi|cadde|cad|cd|bulvari|bulvar|bulv|blv|yolu)\b/g;
+  const streetKey = (s) => key(fold(s).replace(STREET_WORDS, ' '));
+
+  // Adres metnindeki sokak/cadde adları (anahtar olarak)
+  function streetKeys(text) {
+    const toks = tokenize(text);
+    const out = [];
+    toks.forEach((t, i) => {
+      if (!STREET.includes(kind(t.f))) return;
+      const name = [];
+      for (let j = i - 1; j >= 0 && name.length < 3; j--) {
+        const k = kind(toks[j].f);
+        if (k) break;
+        name.unshift(toks[j].clean);
+      }
+      if (name.length) out.push(key(name.join('')));
+    });
+    return out;
+  }
+
+  async function googleSearch(query, ilce, ilAd) {
+    const url = 'https://maps.googleapis.com/maps/api/geocode/json?language=tr&region=tr' +
+      `&address=${encodeURIComponent(`${query}, ${ilce}, ${ilAd}, Türkiye`)}` +
+      `&components=${encodeURIComponent(`country:TR|administrative_area:${ilAd}`)}&key=${cfg.googleKey}`;
+    const d = await util.httpJson(url, {}, 'Google Maps');
+    if (d.status && d.status !== 'OK' && d.status !== 'ZERO_RESULTS') {
+      throw new Error(`${d.status}${d.error_message ? ': ' + d.error_message : ''}`);
+    }
+    return (d.results || []).slice(0, 3).map((r) => {
+      const comps = r.address_components || [];
+      const road = comps.find((c) => (c.types || []).includes('route'));
+      return { road: road ? road.long_name : '', comps: comps.map((c) => c.long_name) };
+    });
+  }
+
+  async function osmSearch(query, ilce, ilAd) {
+    const wait = 1100 - (Date.now() - lastNominatim);
+    if (wait > 0) await sleep(wait); // OpenStreetMap kuralı: saniyede en fazla 1 istek
+    lastNominatim = Date.now();
+    const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&countrycodes=tr&limit=3' +
+      `&q=${encodeURIComponent(`${query}, ${ilce}, ${ilAd}`)}` + (cfg.email ? `&email=${encodeURIComponent(cfg.email)}` : '');
+    const d = await util.httpJson(url, { headers: { 'User-Agent': 'esse-jeffe-otomasyon/1.0', 'Accept-Language': 'tr' } }, 'OpenStreetMap');
+    return (d || []).map((r) => ({ road: (r.address || {}).road || '', comps: Object.values(r.address || {}).map(String) }));
+  }
+
+  // Haritada arar. Mahalle ancak şu üçü birden tutarsa kabul edilir:
+  //  sonuç bizim sokak/caddemize düşmüş, bizim ilçemizde, ve mahalle o ilçenin resmi listesinde var.
+  async function geocode(sKeys, query, ilce, ilAd, list) {
+    let results = null; // [{ road, comps }]
+    if (cfg.googleKey) {
+      try {
+        results = await googleSearch(query, ilce, ilAd);
+      } catch (e) {
+        // Google reddederse (faturalandırma, kota vb.) ücretsiz haritaya geçilir
+        console.error('[adres] harita araması (Google, OpenStreetMap\'e geçiliyor):', e.message);
+      }
+    }
+    if (!results) {
+      try {
+        results = await osmSearch(query, ilce, ilAd);
+      } catch (e) {
+        console.error('[adres] harita araması (OpenStreetMap):', e.message);
+        return null;
+      }
+    }
     const found = new Set();
-    for (const comps of names) {
-      if (!comps.some((c) => key(c) === key(ilce))) continue; // başka ilçeye düşen sonuçları alma
-      for (const c of comps) {
+    for (const r of results) {
+      if (!r.road || !sKeys.includes(streetKey(r.road))) continue; // başka sokağa düşen sonuç
+      if (!r.comps.some((c) => key(c) === key(ilce))) continue;    // başka ilçeye düşen sonuç
+      for (const c of r.comps) {
         const hit = list.find((m) => baseKey(m) === baseKey(c));
         if (hit) found.add(hit);
       }
@@ -774,14 +934,23 @@ const adres = (() => {
     }
     // Mahalle/sokak metni: ilçe alanı olarak kullanılan satır hariç
     const metin = [a.address1, ilceAlani === 'address2' ? '' : a.address2].filter(Boolean).join(' ');
-
     const list = mahalleler(ilKod, ilce);
     const bulunan = findMahalle(metin, list);
 
-    // il/ilçe tekrarlarını temizle
+    // Okul, hastane, üniversite vb. kurum adreslerine dokunulmaz
+    if (isKurum(metin)) {
+      return {
+        durum: bulunan.mahalle ? 'tamam' : 'kurum',
+        notlar: bulunan.mahalle ? [] : ['Kurum adresi (okul, hastane vb.) – otomatik düzenleme yapılmadı'],
+        ilAd, ilce, mahalle: bulunan.mahalle, eklendi: false, degisiklik: null,
+      };
+    }
+
+    // il/ilçe tekrarları temizlenmiş hali (sadece mahalle-ilçe-il uyumluysa kullanılır)
+    const orijinal = String(a.address1 || '').trim();
     let address1 = cleanLine(a.address1, [ilAd, ilce]);
     // İlçe alanı olarak kullanılan satıra dokunulmaz; boşsa ve ilçe adreste yazıyorsa oraya yazılır
-    let address2 = ilceAlani === 'address2' ? String(a.address2 || '').trim()
+    const address2 = ilceAlani === 'address2' ? String(a.address2 || '').trim()
       : ilceAlani === 'tasinacak' ? ilce
       : cleanLine(a.address2, [ilAd, ilce]);
     let mahalle = bulunan.mahalle;
@@ -790,23 +959,35 @@ const adres = (() => {
     if (!mahalle && bulunan.yanlis) {
       notlar.push(`"${bulunan.yanlis}" mahallesi ${ilce} / ${ilAd} içinde bulunamadı`);
     } else if (!mahalle && full) {
-      const street = streetOnly(cleanLine(metin, [ilAd, ilce]));
-      mahalle = street ? await geocode(street, ilce, ilAd, list) : null;
-      if (mahalle) {
-        address1 = `${mahAdi(mahalle)} Mah. ${address1}`.trim();
-        eklendi = true;
+      const sKeys = streetKeys(address1);
+      if (sKeys.length) {
+        mahalle = await geocode(sKeys, streetOnly(address1), ilce, ilAd, list);
+        eklendi = !!mahalle;
       }
     }
-    if (!mahalle && !bulunan.yanlis) notlar.push('Adreste mahalle yok' + (full ? ', haritada da bulunamadı' : ''));
+    // Mahalle–ilçe–il uyumlu değilse adres satırından hiçbir şey silinmez (il/ilçe tekrarı dahil)
+    const tutarli = !!mahalle && notlar.length === 0;
+    if (!tutarli) address1 = orijinal;
+    if (!mahalle && !bulunan.yanlis) notlar.push('Adreste mahalle yok' + (full ? ', haritada da kesin olarak bulunamadı' : ''));
 
-    // Şehir alanı ilçe olarak kullanılmıyorsa sadece il adı kalmalı
+    // Biçimlendirme: satırdaki her kelime bir parçaya oturuyorsa standart sıraya dizilir.
+    const p = bulunan.yanlis ? null : parse(address1);
+    let bicimlendi = false;
+    if (p && (!p.mah || mahalle)) {
+      address1 = render(p, mahalle);
+      bicimlendi = true;
+    } else if (eklendi) {
+      address1 = `${mahAdi(mahalle)} Mah. ${address1}`.trim();
+    }
+
+    // Şehir alanı ilçe olarak kullanılmıyorsa sadece il adı kalmalı (yine sadece uyumluysa)
     let city = String(a.city || '').trim();
-    if (ilceAlani !== 'city' && key(city) !== key(ilAd)) city = ilAd;
+    if (tutarli && ilceAlani !== 'city' && key(city) !== key(ilAd)) city = ilAd;
 
     const degisti = address1 !== String(a.address1 || '').trim() || address2 !== String(a.address2 || '').trim() || city !== String(a.city || '').trim();
     return {
       durum: notlar.length ? 'sorunlu' : 'tamam',
-      notlar, ilAd, ilce, mahalle, eklendi,
+      notlar, ilAd, ilce, mahalle, eklendi, bicimlendi,
       degisiklik: degisti ? { address1, address2, city } : null,
     };
   }
@@ -1236,6 +1417,7 @@ const PAGE = `<!doctype html>
   td.addr.bad{background:#fde8e8 !important;color:#8a1020;box-shadow:inset 3px 0 0 #c62828}
   .anote{display:block;margin-top:4px;font-size:12.5px;font-weight:600}
   .afix{display:block;margin-top:4px;font-size:12.5px;color:var(--ok)}
+  .knote{display:block;margin-top:4px;font-size:12.5px;color:var(--muted)}
   .sku{display:block;font-family:ui-monospace,Menlo,monospace;font-size:14px;white-space:nowrap}
   .mono{font-family:ui-monospace,Menlo,monospace;font-size:14px}
   .tags{color:#5b4a4f;min-width:200px}
@@ -1277,7 +1459,7 @@ const PAGE = `<!doctype html>
 <script>
 const COLS = 13;
 const STAGES = {
-  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da önce adresler kontrol edilir (mahalle yoksa haritada aranıp eklenir, tekrar yazılan il/ilçe silinir), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
+  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da önce adresler kontrol edilir ve düzenlenir (mahalle yoksa haritada aranıp eklenir, adres "Mah. Sok. No: Kat: Daire:" sırasına dizilir, okul/hastane gibi kurum adreslerine dokunulmaz), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
   panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": Google Sheet\\'teki "Siparişler" sayfası temizlenir, seçilenler yazılır ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
   drive: { action: null, hint: 'Drive\\'a aktarılmış siparişler (sipariş tarihine göre). Bu sekmede hiçbir siparişin durumu değişmez.' },
 };
@@ -1323,6 +1505,7 @@ function addrCell(o) {
   const bad = stage === 'panel' && o.adresDurum === 'sorunlu';
   return '<td class="addr' + (bad ? ' bad' : '') + '"' + (bad ? ' title="' + esc(o.adresNot) + '"' : '') + '>' + esc(o.adres) +
     (bad ? '<span class="anote">⚠ ' + esc(o.adresNot) + '</span>' : '') +
+    (stage === 'panel' && o.adresDurum === 'kurum' ? '<span class="knote">' + esc(o.adresNot) + '</span>' : '') +
     (stage !== 'yeni' && o.adresDuzeltildi ? '<span class="afix">✓ adres otomatik düzeltildi</span>' : '') + '</td>';
 }
 
