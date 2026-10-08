@@ -1038,11 +1038,23 @@ const excel = (() => {
     timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
   }) : '';
 
+  // Excel ve Google Sheet'te görünen kanal adları
+  const fold = (s) => adres.fold(s);
+  const KANAL_ADI = { Shopify: 'website', Trendyol: 'trendyol', Hepsiburada: 'hepsiburada' };
+  const kanalAdi = (k) => KANAL_ADI[k] || k;
+
+  // Kargo firması adları: "Marketplace" eki atılır, HepsiJET'in tüm yazımları tek ada indirilir
+  function kargoAdi(name) {
+    const n = String(name || '').trim();
+    if (fold(n).replace(/[^a-z]/g, '').includes('hepsijet')) return 'HepsiJet';
+    return n.replace(/\s*marketplace\s*/gi, ' ').replace(/\s{2,}/g, ' ').trim();
+  }
+
   // Sipariş -> düz değerler (Excel ve Sheet için ortak)
   function toRecord(o) {
     return {
-      kanal: o.kanal, siparisNo: o.siparisNo, tarih: dateText(o.tarih), musteri: o.musteri,
-      telefon: o.telefon, adres: o.adres || '', kargoFirmasi: o.kargoFirmasi, kargoAnahtari: o.kargoAnahtari,
+      kanal: kanalAdi(o.kanal), siparisNo: o.siparisNo, tarih: dateText(o.tarih), musteri: o.musteri,
+      telefon: o.telefon, adres: o.adres || '', kargoFirmasi: kargoAdi(o.kargoFirmasi), kargoAnahtari: o.kargoAnahtari,
       sku: skuText(o), adet: o.adet, tutar: o.tutar ? Math.round(o.tutar * 100) / 100 : '',
       odemeTipi: o.odemeTipi, durum: o.durum, etiketler: o.etiketler || '',
     };
@@ -1072,7 +1084,7 @@ const excel = (() => {
     wb.creator = 'Esse Jeffe Otomasyon';
     // Tek kanal açıksa tek sayfa; birden fazlaysa "Tümü" + kanal sayfaları.
     if (channels.length > 1) addSheet(wb, 'Tümü', orders);
-    for (const kanal of channels) addSheet(wb, kanal, orders.filter((o) => o.kanal === kanal));
+    for (const kanal of channels) addSheet(wb, kanalAdi(kanal), orders.filter((o) => o.kanal === kanal));
     if (warnings.length) {
       const ws = wb.addWorksheet('Uyarılar');
       ws.columns = [{ header: 'Uyarı', key: 'w', width: 120 }];
@@ -1643,7 +1655,7 @@ call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.l
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-08 · adres düzenleme v4';
+const SURUM = '2026-10-08 · v5';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
