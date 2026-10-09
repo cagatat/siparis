@@ -8,7 +8,7 @@ Panel üç aşamadan oluşur:
 | 2 · Panele çekilenler | 1. aşamadan çekilenler | **Drive'a aktar** (ayrıca **Adresleri düzelt**: seçilenlerin adres kontrolünü yeniden çalıştırır, aşamayı değiştirmez) | Google Sheet'teki "Siparişler" sayfasını temizleyip seçilenleri yazar, e-posta gönderir · Shopify: `drive'a aktarıldı - otomatik` etiketi · Trendyol/Hepsiburada: sistem kaydına alınır |
 | 3 · Etiket oluşturulanlar | Drive'a aktarılanlar (tarih aralığıyla) | **Excel indir** | Hiçbir şeyi değiştirmez |
 
-**Shopify adres kontrolü** ("Panele çek" sırasında, her sipariş için). Ödeme formundaki alanlar şöyle okunur:
+**Shopify adres kontrolü**: yeni gelen siparişlerde 5 dakikada bir otomatik çalışır; "Panele çek" ve 2. sekmedeki "Adresleri düzelt" sırasında da tekrar kontrol eder. Düzeltme hangi aşamada yapılırsa yapılsın siparişe `adres düzeltildi - otomatik` etiketi eklenir. Sorunlu adresler 1. ve 2. sekmede kırmızı görünür. Ödeme formundaki alanlar şöyle okunur:
 "Adres" = mahalle, sokak, kapı no · "Apartman, daire vb." = ilçe · "Şehir" = il.
 - "Apartman, daire vb." alanına (ilçe) dokunulmaz. Boşsa ve ilçe adres satırında ya da Şehir alanında yazıyorsa oraya taşınır;
   Şehir alanında "Adana Yüreğir" gibi fazlalık varsa sadece il adı bırakılır.

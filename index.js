@@ -33,6 +33,8 @@ const config = (() => {
     },
     // Adres kontrolü: Google Maps anahtarı varsa o, yoksa OpenStreetMap kullanılır.
     adres: {
+      otomatik: env('ADRES_OTOMATIK', 'evet').toLowerCase() !== 'hayir', // yeni siparişlerde otomatik düzeltme
+      aralikDk: Math.max(1, Number(env('ADRES_ARALIK_DK', '5')) || 5),
       googleKey: env('GOOGLE_MAPS_API_KEY'),
       email: env('ADRES_EMAIL') || env('MAIL_TO').split(',')[0].trim(),
     },
@@ -1417,6 +1419,58 @@ const flow = (() => {
 })();
 
 // ======================================================================
+// OTOMATİK ADRES KONTROLÜ (yeni Shopify siparişleri, birkaç dakikada bir)
+// ======================================================================
+const oto = (() => {
+  // Yeni gelen (1. aşamadaki) Shopify siparişlerinin adresleri düzenli aralıklarla kontrol edilir.
+  // Aynı adres bir kez kontrol edildikten sonra, adres değişmedikçe tekrar haritaya sorulmaz.
+  const cfg = config.adres;
+  const checked = new Map(); // sipariş → kontrol edilen adresin özeti
+  const durum = { acik: cfg.otomatik && config.sources.includes('shopify'), aralikDk: cfg.aralikDk, son: null, duzeltilen: 0, hata: null };
+  let calisiyor = false;
+
+  const ozet = (a) => JSON.stringify([a && a.address1, a && a.address2, a && a.city]);
+
+  async function tur() {
+    if (calisiyor) return;
+    calisiyor = true;
+    try {
+      const rows = await shopify.fetchRows({ stage: 'yeni' });
+      const map = new Map();
+      for (const r of rows) {
+        if (!map.has(r._key)) map.set(r._key, { key: r._key, siparisNo: r.siparisNo, rows: [] });
+        map.get(r._key).rows.push(r);
+      }
+      const bekleyen = [...map.values()].filter((o) => checked.get(o.key) !== ozet(o.rows[0]._ref.address));
+      if (bekleyen.length) {
+        const sonuc = await shopify.fixAddresses(bekleyen);
+        bekleyen.forEach((o) => checked.set(o.key, ozet(o.rows[0]._ref.address)));
+        durum.duzeltilen += sonuc.duzeltildi.length;
+        if (sonuc.duzeltildi.length || sonuc.hata.length) {
+          console.log(`[oto-adres] ${bekleyen.length} sipariş kontrol edildi, ${sonuc.duzeltildi.length} düzeltildi, ${sonuc.sorunlu.length} sorunlu, ${sonuc.hata.length} hata`);
+        }
+      }
+      durum.son = new Date().toISOString();
+      durum.hata = null;
+    } catch (e) {
+      durum.hata = e.message;
+      console.error('[oto-adres]', e.message);
+    } finally {
+      calisiyor = false;
+    }
+  }
+
+  function baslat() {
+    if (!durum.acik) return;
+    setTimeout(tur, 30 * 1000);
+    setInterval(tur, cfg.aralikDk * 60 * 1000);
+    console.log(`[oto-adres] açık: her ${cfg.aralikDk} dakikada bir yeni siparişler kontrol edilecek`);
+  }
+
+  return { baslat, durum };
+})();
+
+// ======================================================================
 // PANEL SAYFASI
 // ======================================================================
 const PAGE = `<!doctype html>
@@ -1483,6 +1537,7 @@ const PAGE = `<!doctype html>
       <button id="action" disabled>Panele çek</button>
     </div>
     <div id="hint"></div>
+    <div id="oto" style="font-size:13px;color:var(--muted);margin:-6px 0 12px"></div>
     <div class="scroll"><table>
       <thead><tr>
         <th><input type="checkbox" id="all"></th><th>Kanal</th><th>Sipariş</th><th>Tarih</th><th>Müşteri</th><th>Telefon</th>
@@ -1496,7 +1551,7 @@ const PAGE = `<!doctype html>
 <script>
 const COLS = 13;
 const STAGES = {
-  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da önce adresler kontrol edilir ve düzenlenir (mahalle yoksa haritada aranıp eklenir, adres "Mah. Sok. No: Kat: Daire:" sırasına dizilir, okul/hastane gibi kurum adreslerine dokunulmaz), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
+  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da adresler son bir kez kontrol edilir (yeni siparişlerin adresleri zaten birkaç dakikada bir otomatik düzenleniyor; sorunlu adresler kırmızı), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
   panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": Google Sheet\\'teki "Siparişler" sayfası temizlenir, seçilenler yazılır ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
   drive: { action: null, hint: 'Drive\\'a aktarılmış siparişler (sipariş tarihine göre). Bu sekmede hiçbir siparişin durumu değişmez.' },
 };
@@ -1540,11 +1595,11 @@ function update() {
 $('all').onchange = (e) => { document.querySelectorAll('.pick').forEach((c) => c.checked = e.target.checked); update(); };
 
 function addrCell(o) {
-  const bad = stage === 'panel' && o.adresDurum === 'sorunlu';
+  const bad = stage !== 'drive' && o.adresDurum === 'sorunlu';
   return '<td class="addr' + (bad ? ' bad' : '') + '"' + (bad ? ' title="' + esc(o.adresNot) + '"' : '') + '>' + esc(o.adres) +
     (bad ? '<span class="anote">⚠ ' + esc(o.adresNot) + '</span>' : '') +
-    (stage === 'panel' && o.adresDurum === 'kurum' ? '<span class="knote">' + esc(o.adresNot) + '</span>' : '') +
-    (stage !== 'yeni' && o.adresDuzeltildi ? '<span class="afix">✓ adres otomatik düzeltildi</span>' : '') + '</td>';
+    (stage !== 'drive' && o.adresDurum === 'kurum' ? '<span class="knote">' + esc(o.adresNot) + '</span>' : '') +
+    (o.adresDuzeltildi ? '<span class="afix">✓ adres otomatik düzeltildi</span>' : '') + '</td>';
 }
 
 function render() {
@@ -1648,6 +1703,17 @@ $('excel').onclick = async () => {
   finally { busy($('excel'), false); }
 };
 
+async function otoDurum() {
+  try {
+    const d = await call('/api/oto-durum');
+    if (!d.acik) { $('oto').textContent = 'Otomatik adres kontrolü kapalı.'; return; }
+    const son = d.son ? new Date(d.son).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) : 'henüz çalışmadı';
+    $('oto').innerHTML = 'Otomatik adres kontrolü: her ' + d.aralikDk + ' dakikada bir · son çalışma ' + son +
+      ' · açılıştan beri ' + d.duzeltilen + ' adres düzeltildi' + (d.hata ? ' · <span class="warn">' + esc(d.hata) + '</span>' : '');
+  } catch {}
+}
+otoDurum(); setInterval(otoDurum, 60000);
+
 setStage('yeni');
 call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.length).catch(() => {});
 </script></body></html>`;
@@ -1655,7 +1721,7 @@ call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.l
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-08 · v5';
+const SURUM = '2026-10-08 · v6';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1719,6 +1785,8 @@ app.post('/api/panele-cek', handle(exclusive(async (req) => {
   return flow.advance({ sessionId, keys });
 })));
 
+app.get('/api/oto-durum', (_req, res) => res.json(oto.durum));
+
 app.post('/api/adres-duzelt', handle(exclusive(async (req) => {
   const { sessionId, keys } = req.body || {};
   return flow.fixAddresses({ sessionId, keys });
@@ -1751,5 +1819,8 @@ app.get('/indir/:id', (req, res) => {
 
 app.get('/', (_req, res) => res.type('html').send(PAGE.replace('{{SURUM}}', SURUM)));
 
-app.listen(config.port, () => console.log(`Panel hazır: port ${config.port}`));
+app.listen(config.port, () => {
+  console.log(`Panel hazır: port ${config.port}`);
+  oto.baslat();
+});
 
