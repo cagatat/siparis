@@ -33,6 +33,8 @@ const config = (() => {
     },
     // Adres kontrolü: Google Maps anahtarı varsa o, yoksa OpenStreetMap kullanılır.
     adres: {
+      // Ana anahtar: "evet" olmadıkça adreslere hiçbir yerde dokunulmaz, kontrol de yapılmaz
+      duzeltme: env('ADRES_DUZELTME', 'hayir').toLowerCase() === 'evet',
       otomatik: env('ADRES_OTOMATIK', 'evet').toLowerCase() !== 'hayir', // yeni siparişlerde otomatik düzeltme
       aralikDk: Math.max(1, Number(env('ADRES_ARALIK_DK', '5')) || 5),
       googleKey: env('GOOGLE_MAPS_API_KEY'),
@@ -234,7 +236,7 @@ const shopify = (() => {
         if (stage === 'yeni' && o.cancelledAt) continue;
         const customer = o.shippingAddress?.name || [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ');
         // Adres kontrolü (sadece okuma; düzeltme "Panele çek" sırasında yapılır)
-        const ak = stage === 'drive' ? null : await adres.check(o.shippingAddress);
+        const ak = stage === 'drive' || !config.adres.duzeltme ? null : await adres.check(o.shippingAddress);
         for (const li of o.lineItems.nodes) {
           // currentQuantity: siparişten çıkarılan / değiştirilen ürünlerde 0 olur.
           const current = li.currentQuantity ?? li.quantity;
@@ -335,7 +337,7 @@ const shopify = (() => {
 
   // 1 → 2: adresleri kontrol et / düzelt, sonra panele çek etiketi ekle
   async function advance(orders) {
-    const adres = await fixAddresses(orders);
+    const adres = config.adres.duzeltme ? await fixAddresses(orders) : null;
     const res = await addTag(orders, T.panel);
     return { ...res, adres };
   }
@@ -1353,6 +1355,7 @@ const flow = (() => {
 
   // 2. aşamada adresleri yeniden kontrol et / düzelt (aşama değişmez; sadece Shopify)
   async function fixAddresses({ sessionId, keys }) {
+    if (!config.adres.duzeltme) throw new Error('Adres düzeltme kapalı (ADRES_DUZELTME).');
     const { selected } = take(sessionId, keys, 'panel');
     const orders = selected.filter((o) => o.kanal === 'Shopify');
     if (!orders.length) throw new Error('Seçilenler arasında Shopify siparişi yok.');
@@ -1431,7 +1434,7 @@ const oto = (() => {
   // Aynı adres bir kez kontrol edildikten sonra, adres değişmedikçe tekrar haritaya sorulmaz.
   const cfg = config.adres;
   const checked = new Map(); // sipariş → kontrol edilen adresin özeti
-  const durum = { acik: cfg.otomatik && config.sources.includes('shopify'), aralikDk: cfg.aralikDk, son: null, duzeltilen: 0, hata: null };
+  const durum = { duzeltme: cfg.duzeltme, acik: cfg.duzeltme && cfg.otomatik && config.sources.includes('shopify'), aralikDk: cfg.aralikDk, son: null, duzeltilen: 0, hata: null };
   let calisiyor = false;
 
   const ozet = (a) => JSON.stringify([a && a.address1, a && a.address2, a && a.city]);
@@ -1556,11 +1559,11 @@ const PAGE = `<!doctype html>
 <script>
 const COLS = 13;
 const STAGES = {
-  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da adresler son bir kez kontrol edilir (yeni siparişlerin adresleri zaten birkaç dakikada bir otomatik düzenleniyor; sorunlu adresler kırmızı), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
+  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da (adres düzeltme açıksa adresler kontrol edilir), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
   panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": Google Sheet\\'teki "Siparişler" sayfası temizlenir, seçilenler yazılır ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
   drive: { action: null, hint: 'Drive\\'a aktarılmış siparişler (sipariş tarihine göre). Bu sekmede hiçbir siparişin durumu değişmez.' },
 };
-let stage = 'yeni', session = null, orders = [];
+let stage = 'yeni', session = null, orders = [], duzeltmeAcik = false;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money = (n) => n ? n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₺' : '';
@@ -1576,7 +1579,7 @@ function setStage(s) {
   $('action').classList.toggle('hide', !STAGES[s].action);
   $('action').dataset.label = STAGES[s].action || '';
   $('mailBox').classList.toggle('hide', s === 'yeni');
-  $('fix').classList.toggle('hide', s !== 'panel');
+  $('fix').classList.toggle('hide', s !== 'panel' || !duzeltmeAcik);
   $('mail').checked = s === 'panel';
   $('fetch').textContent = s === 'drive' ? 'Getir' : 'Yenile';
   $('hint').textContent = STAGES[s].hint;
@@ -1711,6 +1714,9 @@ $('excel').onclick = async () => {
 async function otoDurum() {
   try {
     const d = await call('/api/oto-durum');
+    duzeltmeAcik = !!d.duzeltme;
+    $('fix').classList.toggle('hide', stage !== 'panel' || !duzeltmeAcik);
+    if (!d.duzeltme) { $('oto').textContent = 'Adres düzeltme kapalı.'; return; }
     if (!d.acik) { $('oto').textContent = 'Otomatik adres kontrolü kapalı.'; return; }
     const son = d.son ? new Date(d.son).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) : 'henüz çalışmadı';
     $('oto').innerHTML = 'Otomatik adres kontrolü: her ' + d.aralikDk + ' dakikada bir · son çalışma ' + son +
@@ -1726,7 +1732,7 @@ call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.l
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-09 · v7';
+const SURUM = '2026-10-09 · v8 (adres düzeltme kapalı)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
