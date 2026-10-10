@@ -16,9 +16,10 @@ Panel üç aşamadan oluşur:
 - Adreste mahalle yoksa sokak + ilçe + il ile haritada aranır; bulunan mahalle o ilçenin resmi
   listesinde varsa adresin başına "X Mah." olarak eklenir.
 - Adres satırında tekrar yazılmış il ve ilçe adları sadece mahalle–ilçe–il uyumluysa silinir; uyumsuzluk varsa satıra dokunulmaz.
-- Adres satırı standart sıraya dizilir: `Xxx Mah. Xxx Cad. Xxx Sok. No: 3 Kat: 2 Daire: 5 Xxx Apt. Xxx Sitesi A Blok`.
-  Satırdaki her kelime bu parçalardan birine oturmuyorsa (not, tarif vb.) satır olduğu gibi bırakılır; hiçbir bilgi silinmez,
-  uydurma bilgi eklenmez. Haritadan bulunan mahalle ancak sonuç aynı sokak + aynı ilçeye düşüyorsa eklenir.
+- Sadece emin olunan dört parça standart yazılır ve başa şu sırayla alınır: `Xxx Mah.` → `Xxx Cad.` → `Xxx Sok.` → `Xxx Apt.`
+  Geri kalan her şey (No, Kat, Daire, site adı, blok, bulvar, notlar) yazıldığı gibi ve aynı sırayla arkaya eklenir;
+  kısaltılmaz, büyük/küçük harfi değiştirilmez. Emin olunamayan satıra dokunulmaz, uydurma bilgi eklenmez.
+  Haritadan bulunan mahalle ancak sonuç aynı sokak + aynı ilçeye düşüyorsa eklenir.
 - Okul, hastane, üniversite gibi kurum adreslerine dokunulmaz.
 - Google Maps hata verirse (faturalandırma, kota vb.) arama otomatik olarak OpenStreetMap'e geçer.
 - Değişiklik yapılan siparişlere `adres düzeltildi - otomatik` etiketi eklenir; 2. sekmede yeşil not olarak görünür.

@@ -701,7 +701,8 @@ const adres = (() => {
       for (let i = 0; i + parts.length <= words.length; i++) {
         if (parts.every((p, j) => words[i + j] === p)) {
           const next = words[i + parts.length] || '';
-          if (/^(cad|cd|caddesi|sok|sk|sokak|sokagi|blv|bulv|bulvari|bulvar|yolu|meydani|sitesi|apt)/.test(next)) continue;
+          if (/^(cad|cd|caddesi|sok|sk|sokak|sokagi|blv|bulv|bulvari|bulvar|yolu|meydani|sitesi|site|apt|ap|apartman|evleri|konutlari|bey|hanim|efendi|pasa)/.test(next)) continue;
+          if (parts.join('').length < 5) continue; // "Bey", "Yeni" gibi kısa adlar ekiz yazıldıysa mahalle sayılmaz
           if (!best || parts.length > best.n) best = { mh, n: parts.length };
         }
       }
@@ -734,10 +735,11 @@ const adres = (() => {
   let lastNominatim = 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // ---- Adres satırını standart biçime getirme ----------------------------------
-  // Hedef: "Xxx Mah. Xxx Cad. Xxx Sok. No: 3 Kat: 2 Daire: 5 Xxx Apt. Xxx Sitesi A Blok"
-  // Kural: satırdaki HER kelime bir parçaya oturmalı. Oturmayan tek bir kelime bile varsa
-  // (not, tarif, telefon vb.) satır biçimlendirilmez, olduğu gibi bırakılır.
+  // ---- Adres satırını sadeleştirme ---------------------------------------------
+  // Sadece emin olunan dört parça standart yazılır ve başa şu sırayla alınır:
+  //   Xxx Mah. → Xxx Cad. → Xxx Sok. → Xxx Apt.
+  // Geri kalan her şey (No, Kat, Daire, site adı, blok, notlar...) yazıldığı gibi,
+  // aynı sırayla arkaya eklenir; kısaltılmaz, büyük/küçük harfi değiştirilmez.
   const KURUM = /\b(okul|okulu|ilkokulu|ortaokulu|lise|lisesi|kolej|koleji|anaokulu|kres|kresi|hastane|hastanesi|saglik|polikligi|poliklinik|universite|universitesi|fakulte|fakultesi|kampus|kampusu|yurt|yurdu|cami|camii|belediye|belediyesi|karakol|karakolu|adliye|adliyesi|havalimani|avm|otel|hotel|fabrika|fabrikasi|osb|sanayi|kisla|kislasi|postane|muhtarlik|kaymakamlik|valilik|plaza|is merkezi|ishani)\b/;
   const isKurum = (s) => KURUM.test(fold(s));
 
@@ -745,131 +747,133 @@ const adres = (() => {
     mah: ['mahallesi', 'mahalle', 'mah', 'mh'],
     cad: ['caddesi', 'cadde', 'cad', 'cd'],
     sok: ['sokagi', 'sokak', 'sok', 'sk'],
-    bulv: ['bulvari', 'bulvar', 'bulv', 'blv'],
-    yol: ['yolu'],
     apt: ['apartmani', 'apartman', 'apt', 'ap'],
-    site: ['sitesi', 'site', 'evleri', 'konutlari', 'rezidans', 'residence'],
-    no: ['no', 'numara', 'nu'],
-    kat: ['kat', 'k'],
-    daire: ['daire', 'd', 'da', 'dr'],
-    blok: ['blok', 'blk'],
+    // aşağıdakiler sadece sınır olarak tanınır, dokunulmaz
+    diger: ['bulvari', 'bulvar', 'bulv', 'blv', 'yolu', 'sitesi', 'site', 'evleri', 'konutlari', 'rezidans', 'residence',
+      'no', 'numara', 'kat', 'daire', 'blok', 'blk'],
   };
   const kind = (t) => Object.keys(KW).find((k) => KW[k].includes(t)) || null;
-  const STREET = ['cad', 'sok', 'bulv', 'yol'];
-  const VALUE = /^[0-9]+[a-z]?([/-][0-9a-z]+)?$/;
+  const STREET = ['cad', 'sok'];
+  const isNum = (f) => /^[0-9]/.test(f);
 
-  // Türkçe büyük-küçük harf
   const up = (c) => (c === 'i' ? 'İ' : c === 'ı' ? 'I' : c.toLocaleUpperCase('tr-TR'));
   const title = (w) => {
+    if (/^[0-9]/.test(w)) return w;
     const lower = w.toLocaleLowerCase('tr-TR');
-    return /^[0-9]/.test(lower) ? lower.toLocaleUpperCase('tr-TR') : up(lower[0]) + lower.slice(1);
-  };
-  const titleAll = (words) => words.map(title).join(' ');
-  const streetName = (words) => {
-    // "159" → "159." (numaralı sokak/cadde)
-    if (words.length === 1 && /^[0-9]+$/.test(words[0])) return words[0] + '.';
-    return titleAll(words);
+    return up(lower[0]) + lower.slice(1);
   };
 
+  // Kelimelere böler; her kelimenin orijinal metindeki yeri ve önündeki boşluk/ayraç saklanır.
   function tokenize(line) {
-    const s = String(line || '')
-      .replace(/([.:])(?=\S)/g, '$1 ')            // "mah.159.sok" → "mah. 159. sok"
-      .replace(/\b(no|d|k|kat|daire)(?=\d)/gi, '$1 ') // "no5" → "no 5"
-      .replace(/,/g, ' ');
-    return s.split(/\s+/).filter(Boolean).map((orig) => {
-      const clean = orig.replace(/^[.:;()]+|[.:;()]+$/g, '');
-      return { orig, clean, f: fold(clean) };
-    }).filter((t) => t.clean && !/^[-/]+$/.test(t.clean));
-  }
-
-  // Ayrıştırır; her kelime bir parçaya oturmazsa null döner.
-  function parse(line) {
-    const toks = tokenize(line);
-    const p = { mah: null, streets: [], no: null, kat: null, daire: null, apt: null, site: null, blok: null };
-    let buf = [];
-    const setOnce = (k, v) => { if (p[k] != null) throw 0; p[k] = v; };
-    const valueAt = (i) => (toks[i] && VALUE.test(toks[i].f) ? toks[i].clean.toLocaleUpperCase('tr-TR') : null);
-    try {
-      for (let i = 0; i < toks.length; i++) {
-        const t = toks[i];
-        // "ev no", "kapı no", "bina no", "dış kapı no", "iç kapı" önekleri
-        if (['ev', 'kapi', 'bina', 'dis', 'ic'].includes(t.f) && toks[i + 1] && ['no', 'kapi', 'numara'].includes(toks[i + 1].f) && !buf.length) {
-          const icKapi = t.f === 'ic'; // "iç kapı" = daire numarası
-          i++;
-          if (toks[i].f === 'kapi' && toks[i + 1] && ['no', 'numara'].includes(toks[i + 1].f)) i++;
-          const v = valueAt(i + 1);
-          if (!v) throw 0;
-          setOnce(icKapi ? 'daire' : 'no', v); i++;
-          continue;
-        }
-        const k = kind(t.f);
-        if (k === 'mah') { if (!buf.length) throw 0; setOnce('mah', buf); buf = []; continue; }
-        if (STREET.includes(k)) { if (!buf.length) throw 0; p.streets.push({ k, words: buf }); buf = []; continue; }
-        if (k === 'apt' || k === 'site') {
-          if (!buf.length) throw 0;
-          setOnce(k, { words: buf, kw: t.clean }); buf = []; continue;
-        }
-        if (k === 'blok') {
-          if (buf.length === 1 && /^[a-z0-9]{1,3}$/.test(fold(buf[0]))) { setOnce('blok', buf[0].toLocaleUpperCase('tr-TR')); buf = []; continue; }
-          if (!buf.length && toks[i + 1] && /^[a-z0-9]{1,3}$/.test(toks[i + 1].f)) { setOnce('blok', toks[i + 1].clean.toLocaleUpperCase('tr-TR')); i++; continue; }
-          throw 0;
-        }
-        if (k === 'no' || k === 'kat' || k === 'daire') {
-          const v = valueAt(i + 1);
-          if (buf.length || !v) {
-            // "k", "d" gibi kısa harfler isim içinde de geçebilir → kelime olarak devam
-            if (['k', 'd', 'da', 'nu'].includes(t.f) && !v) { buf.push(t.clean); continue; }
-            throw 0;
-          }
-          setOnce(k, v); i++;
-          continue;
-        }
-        buf.push(t.clean);
-      }
-      if (buf.length) throw 0;
-    } catch {
-      return null;
+    const s = String(line || '');
+    const toks = [];
+    const re = /[^\s,]+/g;
+    let m;
+    while ((m = re.exec(s))) {
+      // "mah.159.sok.ev" gibi bitişik yazımları noktadan sonra böl
+      const parts = m[0].split(/(?<=[.:])(?=[^\s.:])/);
+      let pos = m.index;
+      parts.forEach((p) => {
+        const clean = p.replace(/^[.:;()]+|[.:;()]+$/g, '');
+        toks.push({ orig: p, clean, f: fold(clean), start: pos, end: pos + p.length });
+        pos += p.length;
+      });
     }
-    return p;
+    toks.forEach((t, i) => { t.gap = s.slice(i ? toks[i - 1].end : 0, t.start); });
+    return toks.filter((t) => t.clean || t.orig.trim());
   }
 
-  function render(p, mahalleResmi) {
-    const out = [];
-    if (mahalleResmi) out.push(`${mahAdi(mahalleResmi)} Mah.`);
-    const SUF = { cad: 'Cad.', sok: 'Sok.', bulv: 'Bulv.', yol: 'Yolu' };
-    for (const s of p.streets) out.push(`${streetName(s.words)} ${SUF[s.k]}`);
-    if (p.no) out.push(`No: ${p.no}`);
-    if (p.kat) out.push(`Kat: ${p.kat}`);
-    if (p.daire) out.push(`Daire: ${p.daire}`);
-    if (p.apt) out.push(`${titleAll(p.apt.words)} Apt.`);
-    if (p.site) {
-      const kw = ['site', 'sitesi'].includes(fold(p.site.kw)) ? 'Sitesi' : title(p.site.kw);
-      out.push(`${titleAll(p.site.words)} ${kw}`);
-    }
-    if (p.blok) out.push(`${p.blok} Blok`);
-    return out.join(' ');
-  }
-
-  // Sokak/cadde adının karşılaştırma anahtarı: "159. Sokak" → "159", "Petunya Sk." → "petunya"
-  const STREET_WORDS = /\b(sokagi|sokak|sok|sk|caddesi|cadde|cad|cd|bulvari|bulvar|bulv|blv|yolu)\b/g;
-  const streetKey = (s) => key(fold(s).replace(STREET_WORDS, ' '));
-
-  // Adres metnindeki sokak/cadde adları (anahtar olarak)
   function streetKeys(text) {
     const toks = tokenize(text);
     const out = [];
     toks.forEach((t, i) => {
-      if (!STREET.includes(kind(t.f))) return;
+      if (!STREET.includes(kind(t.f)) && !['bulvari', 'bulvar', 'bulv', 'blv', 'yolu'].includes(t.f)) return;
       const name = [];
       for (let j = i - 1; j >= 0 && name.length < 3; j--) {
-        const k = kind(toks[j].f);
-        if (k) break;
+        if (kind(toks[j].f)) break;
         name.unshift(toks[j].clean);
+        if (isNum(toks[j].f) || /,/.test(toks[j].gap)) break;
       }
       if (name.length) out.push(key(name.join('')));
     });
     return out;
   }
+
+  // Satırı yeniden düzenler. Emin olunamazsa null döner (satıra dokunulmaz).
+  //  mahalleResmi: resmi mahalle adı (haritadan bulunduysa ya da yazılanın doğrulanmış hali)
+  function restructure(line, mahalleResmi, list) {
+    const toks = tokenize(line);
+    const used = new Set();
+    const seg = { mah: null, cad: [], sok: [], apt: null };
+
+    for (let i = 0; i < toks.length; i++) {
+      const k = kind(toks[i].f);
+      if (!['mah', 'cad', 'sok', 'apt'].includes(k)) continue;
+      // anahtar kelimeden geriye doğru isim kelimelerini topla
+      const name = [];
+      for (let j = i - 1; j >= 0 && name.length < 4; j--) {
+        if (used.has(j) || kind(toks[j].f)) break;
+        if (name.length && isNum(toks[j].f)) break;      // önceki parçanın numarası
+        name.unshift(j);
+        if (isNum(toks[j].f)) break;                       // "159 Sok." → isim sadece numara
+        if (/,/.test(toks[j].gap)) break;                  // virgül sınırı
+      }
+      if (!name.length) return null;
+      if (k === 'mah') {
+        if (seg.mah) return null;
+        // resmi listede eşleşen en kısa sondan başlayan kelime grubu mahalle adıdır
+        let hitAt = -1;
+        for (let n = 1; n <= name.length; n++) {
+          const cand = name.slice(-n).map((j) => toks[j].f).join('');
+          if (list.some((m) => baseKey(m) === key(cand)) || (n === name.length && bestMatch(key(cand), list, baseKey))) { hitAt = n; break; }
+        }
+        if (hitAt < 0) return null;
+        const idx = name.slice(-hitAt);
+        idx.forEach((j) => used.add(j));
+        used.add(i);
+        seg.mah = true;
+        continue;
+      }
+      if (name.length > 3) return null;                    // isim sınırından emin değiliz
+      name.forEach((j) => used.add(j));
+      used.add(i);
+      const text = name.map((j) => title(toks[j].clean) + (isNum(toks[j].f) && /\.$/.test(toks[j].orig) ? '.' : '')).join(' ');
+      if (k === 'apt') { if (seg.apt) return null; seg.apt = text; } else seg[k].push(text);
+    }
+
+    // Mahalle eksiz yazılmışsa ("Cihangir 1234 sk") o kelimeler de mahalle parçası sayılır
+    if (mahalleResmi && !seg.mah) {
+      const want = fold(mahAdi(mahalleResmi)).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+      for (let i = 0; i + want.length <= toks.length; i++) {
+        if (want.every((w, j) => !used.has(i + j) && toks[i + j].f === w)) {
+          want.forEach((_, j) => used.add(i + j));
+          break;
+        }
+      }
+    }
+
+    const parts = [];
+    if (mahalleResmi) parts.push(`${mahAdi(mahalleResmi)} Mah.`);
+    else if (seg.mah) return null;
+    seg.cad.forEach((t) => parts.push(`${t} Cad.`));
+    seg.sok.forEach((t) => parts.push(`${t} Sok.`));
+    if (seg.apt) parts.push(`${seg.apt} Apt.`);
+
+    // geri kalanlar: yazıldığı gibi, aynı sırayla
+    let rest = '';
+    let prevUsed = true;
+    toks.forEach((t, i) => {
+      if (used.has(i)) { prevUsed = true; return; }
+      rest += (rest && !prevUsed ? t.gap : rest ? ' ' : '') + t.orig;
+      prevUsed = false;
+    });
+    rest = rest.replace(/^[\s,/-]+/, '').trim();
+    return [...parts, rest].filter(Boolean).join(' ');
+  }
+
+  // Sokak/cadde adının karşılaştırma anahtarı: "159. Sokak" → "159", "Petunya Sk." → "petunya"
+  const STREET_WORDS = /\b(sokagi|sokak|sok|sk|caddesi|cadde|cad|cd|bulvari|bulvar|bulv|blv|yolu)\b/g;
+  const streetKey = (s) => key(fold(s).replace(STREET_WORDS, ' '));
 
   async function googleSearch(query, ilce, ilAd) {
     const url = 'https://maps.googleapis.com/maps/api/geocode/json?language=tr&region=tr' +
@@ -988,14 +992,15 @@ const adres = (() => {
     if (!tutarli) address1 = orijinal;
     if (!mahalle && !bulunan.yanlis) notlar.push('Adreste mahalle yok' + (full ? ', haritada da kesin olarak bulunamadı' : ''));
 
-    // Biçimlendirme: satırdaki her kelime bir parçaya oturuyorsa standart sıraya dizilir.
-    const p = bulunan.yanlis ? null : parse(address1);
+    // Düzenleme: Mah./Cad./Sok./Apt. emin olunan yerlerde standart yazılır ve başa alınır,
+    // geri kalan her şey yazıldığı gibi kalır. Emin olunamazsa satıra dokunulmaz.
     let bicimlendi = false;
-    if (p && (!p.mah || mahalle)) {
-      address1 = render(p, mahalle);
-      bicimlendi = true;
-    } else if (eklendi) {
-      address1 = `${mahAdi(mahalle)} Mah. ${address1}`.trim();
+    if (!bulunan.yanlis) {
+      // Mahalle adı satıra sadece yazılı halini düzeltmek ya da haritadan bulunanı eklemek için yazılır
+      const yaz = mahalle;
+      const yeni = restructure(address1, yaz, list);
+      if (yeni) { address1 = yeni; bicimlendi = true; }
+      else if (eklendi) address1 = `${mahAdi(mahalle)} Mah. ${address1}`.trim();
     }
 
     // Şehir alanı ilçe olarak kullanılmıyorsa sadece il adı kalmalı (yine sadece uyumluysa)
@@ -1721,7 +1726,7 @@ call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.l
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-08 · v6';
+const SURUM = '2026-10-09 · v7';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
