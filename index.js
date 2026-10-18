@@ -1038,6 +1038,15 @@ const excel = (() => {
     { header: 'Etiketler', key: 'etiketler', width: 30 },
   ];
 
+  // SKU sıralama: sipariş içindeki SKU'lar alfabetik (sayılar doğal sırada), siparişler de
+  // ilk SKU'larına göre sıralanır — aynı ürünler Excel'de alt alta gelir.
+  const cmp = new Intl.Collator('tr', { numeric: true, sensitivity: 'base' }).compare;
+  function sortBySku(orders) {
+    return orders
+      .map((o) => ({ ...o, skus: [...o.skus].sort((a, b) => cmp(a.sku, b.sku)) }))
+      .sort((a, b) => cmp(a.skus[0]?.sku || '', b.skus[0]?.sku || '') || cmp(a.siparisNo, b.siparisNo));
+  }
+
   const skuText = (o) => o.skus.map((x) => (x.adet > 1 ? `${x.sku} ×${x.adet}` : x.sku)).join('\n');
   const dateText = (d) => d ? new Date(d).toLocaleString('tr-TR', {
     timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
@@ -1099,7 +1108,7 @@ const excel = (() => {
     return wb.xlsx.writeBuffer();
   }
 
-  return { buildWorkbook, COLUMNS, toRecord };
+  return { buildWorkbook, COLUMNS, toRecord, sortBySku };
 })();
 
 // ======================================================================
@@ -1380,12 +1389,12 @@ const flow = (() => {
     if (!exported.length) throw new Error('Hiçbir sipariş aktarılamadı. ' + warnings.join(' '));
 
     let sheet = null;
+    const ordered = excel.sortBySku(exported);
     if (sheets.configured()) {
-      try { sheet = await sheets.writeOrders(exported); }
+      try { sheet = await sheets.writeOrders(ordered); }
       catch (e) { console.error(e); warnings.push(`Google Sheet'e yazılamadı: ${e.message}`); }
     }
 
-    const ordered = sortDesc([...exported]);
     const buffer = await buildWorkbook(ordered, warnings, channels);
     const filename = fileName('siparisler');
     const mail = await mailList({ title: "Excel'e aktarılan siparişler", orders: ordered, buffer, filename, sheet, warnings });
@@ -1395,7 +1404,7 @@ const flow = (() => {
   // Aktarılanlar listesinden seçilenleri yeniden Excel olarak almak (durum değiştirmez)
   async function download({ sessionId, keys }) {
     const { selected } = take(sessionId, keys);
-    const buffer = await buildWorkbook(selected, [], active().map(([n]) => n));
+    const buffer = await buildWorkbook(excel.sortBySku(selected), [], active().map(([n]) => n));
     return { orderCount: selected.length, buffer, filename: fileName('aktarilanlar') };
   }
 
@@ -1462,39 +1471,41 @@ const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Esse Jeffe Siparişler</title>
 <style>
-  :root{--ink:#2b2023;--muted:#7a6a6e;--brand:#3b2a2f;--bg:#f6f2ee;--line:#e6dcd6;--zebra:#fcfaf8;--warn:#b00020;--ok:#1d6b3a}
+  :root{--ink:#1f1719;--muted:#5e4f53;--brand:#3b2a2f;--bg:#f6f2ee;--line:#e4d9d3;--zebra:#fbf8f6;--warn:#b00020;--ok:#1d6b3a}
   *{box-sizing:border-box}
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:20px 24px;font-size:15px}
+  body{font-family:"Segoe UI",system-ui,-apple-system,Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink);
+    margin:0;padding:12px 16px;font-size:14.5px;line-height:1.35;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
   .wrap{max-width:1900px;margin:0 auto}
-  h1{font-size:22px;margin:0 0 16px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  h1{font-size:18px;margin:0 0 10px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
   h1 small{font-size:12px;font-weight:400;color:var(--muted)}
-  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px}
-  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
-  button{padding:12px 20px;font-size:15px;font-weight:600;border:0;border-radius:10px;background:var(--brand);color:#fff;cursor:pointer}
+  .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+  button{padding:8px 16px;font:inherit;font-weight:600;border:0;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer}
   button.ghost{background:#efe8e3;color:var(--ink)}
-  button.link{background:none;color:var(--muted);padding:8px 4px;text-decoration:underline;font-weight:500}
+  button.link{background:none;color:var(--muted);padding:6px 4px;text-decoration:underline;font-weight:500}
   button:disabled{opacity:.5;cursor:not-allowed}
-  input[type=date]{padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit}
+  input[type=date]{padding:6px 8px;border:1px solid var(--line);border-radius:6px;font:inherit}
   .count{color:var(--muted)}
-  .scroll{overflow:auto;max-height:calc(100vh - 230px);border:1px solid var(--line);border-radius:10px}
-  table{border-collapse:collapse;width:100%;font-size:15px;min-width:1400px}
-  th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;line-height:1.45}
-  th{background:#f3ece7;font-weight:700;position:sticky;top:0;z-index:1;white-space:nowrap}
+  .scroll{overflow:auto;max-height:calc(100vh - 150px);border:1px solid var(--line);border-radius:8px}
+  table{border-collapse:collapse;width:100%;min-width:1150px}
+  th,td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:#f3ece7;font-size:13px;font-weight:700;position:sticky;top:0;z-index:1;white-space:nowrap;color:var(--muted)}
+  th:first-child,td:first-child{width:32px;padding-right:0}
   tbody tr:nth-child(even) td{background:var(--zebra)}
-  tbody tr:hover td{background:#f5ede8}
+  tbody tr:hover td{background:#f3e9e3}
   tr.off td{opacity:.4}
   td.num{text-align:right;white-space:nowrap}
   td.nowrap{white-space:nowrap}
-  td.addr{min-width:240px;max-width:340px}
+  td.addr{min-width:220px;max-width:320px}
   td.addr.bad{background:#fde8e8 !important;color:#8a1020;box-shadow:inset 3px 0 0 #c62828}
-  .anote{display:block;margin-top:4px;font-size:12.5px;font-weight:600}
-  .afix{display:block;margin-top:4px;font-size:12.5px;color:var(--ok)}
-  .sku{display:block;font-family:ui-monospace,Menlo,monospace;font-size:14px;white-space:nowrap}
-  .mono{font-family:ui-monospace,Menlo,monospace;font-size:14px}
-  .tags{color:#5b4a4f;min-width:200px}
-  input[type=checkbox]{width:18px;height:18px}
-  .empty{padding:40px;text-align:center;color:var(--muted)}
-  #msg{margin-bottom:12px;line-height:1.7}
+  .anote{display:block;margin-top:2px;font-size:12.5px;font-weight:600}
+  .afix{display:block;margin-top:2px;font-size:12.5px;color:var(--ok)}
+  .sku{display:block;font-family:ui-monospace,"Cascadia Mono",Consolas,Menlo,monospace;font-size:13.5px;font-weight:500;white-space:nowrap}
+  .mono{font-family:ui-monospace,"Cascadia Mono",Consolas,Menlo,monospace;font-size:13px;color:var(--muted)}
+  .tags{color:var(--muted);min-width:140px;font-size:13.5px}
+  input[type=checkbox]{width:16px;height:16px;margin:2px 0 0}
+  .empty{padding:28px;text-align:center;color:var(--muted)}
+  #msg{margin-bottom:8px;line-height:1.6}
   #msg:empty{display:none}
   .warn{color:var(--warn)} .ok{color:var(--ok)}
   a.dl{font-weight:700;color:var(--brand);margin-right:16px}
@@ -1645,7 +1656,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-18 · v9 (tek sayfa: çek → Excel)';
+const SURUM = '2026-10-18 · v10 (kompakt sayfa, SKU sıralı Excel)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
