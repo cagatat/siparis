@@ -11,17 +11,17 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
   E-posta (Resend) · Sipariş akışı (flow) · Otomatik adres kontrolü (oto) · Panel sayfası (PAGE) · Sunucu.
 - Her değişiklikte `SURUM` sabitini artır (panel başlığında görünür, dağıtımı doğrulamak için kullanılıyor).
 
-## Panel akışı (3 aşama)
-1. **Yeni gelen siparişler** — hiç dokunulmamış. "Panele çek":
-   Shopify → `etiket oluşturuldu - otomatik` etiketi; Trendyol → `Picking` ("İşleme Alındı");
-   Hepsiburada → paketle ("Gönderime Hazır"). Butonlar onay sormaz (kullanıcı isteği).
-2. **Panele çekilenler** — "Drive'a aktar": Google Sheet'te tek sayfa ("Siparişler") her seferinde
-   başlık hariç temizlenir, seçilenler 2. satırdan yazılır; e-posta (Sheet linki + Excel eki);
-   Shopify → `drive'a aktarıldı - otomatik`; Trendyol/Hepsiburada → `DATA_DIR/aktarilanlar.json`.
-3. **Etiket oluşturulanlar** — tarih aralığıyla görüntüleme + Excel indirme, durum değiştirmez.
-   Eski `etiketi çıkarıldı - otomatik` etiketli siparişler de burada sayılır.
+## Panel akışı (tek sayfa — kullanıcı 3 aşamalı sistemi istemedi, geri getirme)
+- **Siparişleri çek**: Excel'e aktarılmamış siparişleri listeler, hiçbir şeyi değiştirmez.
+- **Excel'e aktar**: seçilenler Excel'e yazılır ve indirilir. Shopify → tek etiket `excel`
+  (`SHOPIFY_ETIKET_EXCEL`); Trendyol → `Picking`; Hepsiburada → paketle; ikisi de `DATA_DIR/aktarilanlar.json`.
+  Google Sheet ("Siparişler" sayfası, başlık hariç temizlenip yazılır) ve e-posta ayarlıysa yapılır, yoksa atlanır.
+  Butonlar onay sormaz (kullanıcı isteği).
+- **Önceki aktarımlar** (aynı sayfada): tarih aralığıyla görüntüleme + Excel indirme, durum değiştirmez.
+- Eski etiketler: `drive'a aktarıldı - otomatik` / `etiketi çıkarıldı - otomatik` aktarılmış sayılır;
+  `etiket oluşturuldu - otomatik` bekleyen sayılır.
 
-Her sekmede bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiştirilmiş kalemler
+Bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiştirilmiş kalemler
 (`currentQuantity` = 0) hariç. Etiketler kolonu en sonda (bizim otomatik etiketlerimiz gizli).
 
 ## Excel / Sheet çıktısı
