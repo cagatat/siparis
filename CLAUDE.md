@@ -29,6 +29,7 @@ Bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiş
 - Kargo adları: "Marketplace" kelimesi atılır (Trendyol Express); HepsiJET'in tüm yazımları → `HepsiJet`.
 - Kolonlar: (Sheet'te başta "Aktarım") Kanal, Sipariş No, Tarih, Müşteri, Telefon, Adres, Kargo Firması,
   Kargo Anahtarı (Shopify'da siparişin uzun sistem ID'si = legacyResourceId), SKU, Adet, Tutar, Ödeme, Durum, Etiketler.
+- SKU sıralı: sipariş içindeki SKU'lar alfabetik (doğal sayı sırası), siparişler ilk SKU'ya göre (Excel ve Sheet).
 - Uzun ID'ler ve telefonlar metin olarak yazılır (Sheet'te `valueInputOption=RAW`).
 
 ## Shopify
