@@ -1,6 +1,6 @@
 // Esse Jeffe Otomasyon — tüm uygulama tek dosyada.
-// Bölümler: Ayarlar · Yardımcılar · Shopify · Trendyol · Hepsiburada · Kayıt · Excel ·
-//           Google Sheets · E-posta · Sipariş akışı · Panel sayfası · Sunucu
+// Bölümler: Ayarlar · Yardımcılar · Shopify · Trendyol · Hepsiburada · Kayıt · Adres kontrolü ·
+//           Excel · Google Sheets · E-posta · Sipariş akışı · Otomatik adres kontrolü · Panel sayfası · Sunucu
 const crypto = require('crypto');
 const express = require('express');
 const ExcelJS = require('exceljs');
@@ -15,7 +15,7 @@ const config = (() => {
     port: Number(env('PORT', '3000')),
     // Hangi kanallar taransın (virgülle): shopify,trendyol,hepsiburada
     sources: env('KANALLAR', 'shopify').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean),
-    // Trendyol/Hepsiburada'da Drive'a aktarılanların kaydı burada tutulur (Railway volume yolu: /data)
+    // Trendyol/Hepsiburada'da Excel'e aktarılanların kaydı burada tutulur (Railway volume yolu: /data)
     dataDir: env('DATA_DIR', './data'),
     panel: { user: env('PANEL_USER'), password: env('PANEL_PASSWORD') },
     shopify: {
@@ -25,9 +25,11 @@ const config = (() => {
       accessToken: env('SHOPIFY_ACCESS_TOKEN'),
       apiVersion: env('SHOPIFY_API_VERSION', '2026-07'),
       tags: {
-        panel: env('SHOPIFY_ETIKET_PANEL', 'etiket oluşturuldu - otomatik'),   // 2. aşama
-        drive: env('SHOPIFY_ETIKET_DRIVE', "drive'a aktarıldı - otomatik"),   // 3. aşama
-        eski: env('SHOPIFY_ETIKET', 'etiketi çıkarıldı - otomatik'),          // önceki sürüm; 3. aşama sayılır
+        excel: env('SHOPIFY_ETIKET_EXCEL', 'excel'),                           // Excel'e aktarılan siparişler
+        // Önceki sürümlerin etiketleri: "drive" ve "eski" aktarılmış sayılır, "panel" bekleyen sayılır.
+        panel: 'etiket oluşturuldu - otomatik',
+        drive: "drive'a aktarıldı - otomatik",
+        eski: 'etiketi çıkarıldı - otomatik',
         adres: env('SHOPIFY_ETIKET_ADRES', 'adres düzeltildi - otomatik'),    // adres kontrolü değişiklik yaptıysa
       },
     },
@@ -105,15 +107,14 @@ const util = (() => {
 // SHOPIFY
 // ======================================================================
 const shopify = (() => {
-  // Aşamalar etiketlerle izlenir:
-  //  yeni  : açık, gönderilmemiş, bizim etiketlerimizden hiçbiri yok
-  //  panel : "etiket oluşturuldu - otomatik" var, Drive etiketi yok
-  //  drive : "drive'a aktarıldı - otomatik" (veya önceki sürümün etiketi) var
+  // Durum tek etiketle izlenir:
+  //  bekleyen  : açık, gönderilmemiş, "excel" etiketi yok
+  //  aktarilan : "excel" etiketi (veya önceki sürümlerin aktarım etiketi) var
   // Kargo anahtarı = siparişin uzun sistem ID'si (legacyResourceId).
   const cfg = config.shopify;
   const T = cfg.tags;
-  const OURS = [T.panel, T.drive, T.eski];        // aşama etiketleri
-  const HIDDEN = [...OURS, T.adres];                // Etiketler kolonunda gösterilmeyenler
+  const DONE = [T.excel, T.drive, T.eski];                 // aktarılmış sayılan etiketler
+  const HIDDEN = [T.excel, T.panel, T.drive, T.eski, T.adres]; // Etiketler kolonunda gösterilmeyenler
   const { httpJson, toNumber, toDate } = util;
 
   let cachedToken = null;
@@ -203,19 +204,16 @@ const shopify = (() => {
   }
 
   // Shopify araması kaba filtre; kesin ayrım aşağıda etiketlere bakılarak yapılır.
+  // (Eski Drive etiketi kesme işareti içerdiği için aramaya konmaz, kodda elenir.)
   function buildQuery({ stage, from, to }) {
-    if (stage === 'panel') return q(T.panel);
-    // Drive etiketi kesme işareti içerdiği için aramada tarihe göre çekilip etikete kodda bakılır.
-    if (stage === 'drive') return dateRange(from, to).join(' AND ');
+    if (stage === 'aktarilan') return dateRange(from, to).join(' AND ');
     return `status:open AND (fulfillment_status:unfulfilled OR fulfillment_status:partial)` +
-      OURS.map((t) => ` AND NOT ${q(t)}`).join('');
+      [T.excel, T.eski].map((t) => ` AND NOT ${q(t)}`).join('');
   }
 
   function inStage(stage, tags) {
-    const has = (t) => tags.includes(t);
-    if (stage === 'yeni') return !OURS.some(has);
-    if (stage === 'panel') return has(T.panel) && !has(T.drive) && !has(T.eski);
-    return has(T.drive) || has(T.eski);
+    const done = DONE.some((t) => tags.includes(t));
+    return stage === 'aktarilan' ? done : !done;
   }
 
   function address(a) {
@@ -223,7 +221,7 @@ const shopify = (() => {
     return [a.address1, a.address2, a.city, a.province, a.zip].filter(Boolean).join(', ');
   }
 
-  async function fetchRows({ stage = 'yeni', from, to } = {}) {
+  async function fetchRows({ stage = 'bekleyen', from, to } = {}) {
     checkConfig();
     const query = buildQuery({ stage, from, to });
     const rows = [];
@@ -233,14 +231,14 @@ const shopify = (() => {
       for (const o of page.nodes) {
         const tags = o.tags || [];
         if (!inStage(stage, tags)) continue;
-        if (stage === 'yeni' && o.cancelledAt) continue;
+        if (stage === 'bekleyen' && o.cancelledAt) continue;
         const customer = o.shippingAddress?.name || [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ');
-        // Adres kontrolü (sadece okuma; düzeltme "Panele çek" sırasında yapılır)
-        const ak = stage === 'drive' || !config.adres.duzeltme ? null : await adres.check(o.shippingAddress);
+        // Adres kontrolü (sadece okuma; düzeltmeyi otomatik adres kontrolü yapar)
+        const ak = stage === 'aktarilan' || !config.adres.duzeltme ? null : await adres.check(o.shippingAddress);
         for (const li of o.lineItems.nodes) {
           // currentQuantity: siparişten çıkarılan / değiştirilen ürünlerde 0 olur.
           const current = li.currentQuantity ?? li.quantity;
-          const qty = stage === 'drive' ? current : Math.min(li.unfulfilledQuantity, current);
+          const qty = stage === 'aktarilan' ? current : Math.min(li.unfulfilledQuantity, current);
           if (!qty) continue;
           const unit = toNumber(li.originalUnitPriceSet?.shopMoney?.amount);
           rows.push({
@@ -335,30 +333,23 @@ const shopify = (() => {
     return adresSonuc;
   }
 
-  // 1 → 2: adresleri kontrol et / düzelt, sonra panele çek etiketi ekle
-  async function advance(orders) {
-    const adres = config.adres.duzeltme ? await fixAddresses(orders) : null;
-    const res = await addTag(orders, T.panel);
-    return { ...res, adres };
-  }
-  // 2 → 3: Drive'a aktarıldı
-  const markExported = (orders) => addTag(orders, T.drive);
+  // Excel'e aktarıldı: tek etiket
+  const markExported = (orders) => addTag(orders, T.excel);
 
-  return { fetchRows, advance, markExported, fixAddresses, usesStore: false };
+  return { fetchRows, markExported, fixAddresses, usesStore: false };
 })();
 
 // ======================================================================
 // TRENDYOL
 // ======================================================================
 const trendyol = (() => {
-  // yeni : Created paketler
-  // panel: Picking / Invoiced paketler (Drive'a aktarılanlar sistem kaydından düşülür)
-  // Panele çek = paketi "Picking" (Trendyol panelinde "İşleme Alındı") yapar.
+  // bekleyen: Created / Picking / Invoiced paketler (Excel'e aktarılanlar sistem kaydından düşülür)
+  // Excel'e aktar = Created paketi "Picking" (Trendyol panelinde "İşleme Alındı") yapar.
   const cfg = config.trendyol;
   const { httpJson, pick, toNumber, toDate } = util;
 
   const BASE = 'https://apigw.trendyol.com/integration/order/sellers';
-  const STATUS = { yeni: ['Created'], panel: ['Picking', 'Invoiced'] };
+  const STATUS = ['Created', 'Picking', 'Invoiced'];
   const DURUM = { Created: 'Yeni', Picking: 'İşleme Alındı', Invoiced: 'Faturalandı' };
   const DAY = 24 * 60 * 60 * 1000;
 
@@ -391,16 +382,16 @@ const trendyol = (() => {
     return a.fullAddress || [a.address1, a.address2, a.district, a.city].filter(Boolean).join(', ');
   }
 
-  async function fetchRows({ stage = 'yeni' } = {}) {
+  async function fetchRows() {
     const h = headers();
     const rows = [];
-    for (const status of STATUS[stage] || []) {
+    for (const status of STATUS) {
       for (const p of await fetchStatus(status, h)) {
         const customer = pick(p, 'shipmentAddress.fullName') || [p.customerFirstName, p.customerLastName].filter(Boolean).join(' ');
         for (const line of p.lines || []) {
           rows.push({
             _key: `Trendyol:${p.id}`,
-            _ref: { packageId: p.id, lineId: pick(line, 'id', 'lineId'), qty: toNumber(line.quantity) },
+            _ref: { packageId: p.id, lineId: pick(line, 'id', 'lineId'), qty: toNumber(line.quantity), status },
             kanal: 'Trendyol',
             siparisNo: String(pick(p, 'orderNumber')),
             tarih: toDate(p.orderDate),
@@ -423,12 +414,13 @@ const trendyol = (() => {
     return rows;
   }
 
-  // 1 → 2: paketleri "Picking" yapar
+  // Excel'e aktarırken: henüz işleme alınmamış (Created) paketleri "Picking" yapar
   async function advance(orders) {
     const h = headers();
     const done = [];
     const failed = [];
     for (const o of orders) {
+      if (o.rows[0]._ref.status !== 'Created') { done.push(o.key); continue; }
       const packageId = o.rows[0]._ref.packageId;
       try {
         await httpJson(`${BASE}/${cfg.sellerId}/shipment-packages/${packageId}`, {
@@ -455,9 +447,9 @@ const trendyol = (() => {
 // HEPSIBURADA
 // ======================================================================
 const hepsiburada = (() => {
-  // yeni : paketlenecek kalemler (sipariş numarasına göre gruplanır)
-  // panel: paketlenmiş, kargoya verilmemiş paketler (Drive'a aktarılanlar sistem kaydından düşülür)
-  // Panele çek = siparişin tüm kalemlerini tek pakette paketler ("Gönderime Hazır").
+  // bekleyen: paketlenecek kalemler + paketlenmiş, kargoya verilmemiş paketler
+  //           (Excel'e aktarılanlar sistem kaydından düşülür)
+  // Excel'e aktar = paketlenmemiş siparişin tüm kalemlerini tek pakette paketler ("Gönderime Hazır").
   // Not: Alan adları ilk gerçek çalıştırmada kontrol edilecek; pick() birden fazla olası adı dener.
   const cfg = config.hepsiburada;
   const { httpJson, pick, toNumber, toDate } = util;
@@ -511,20 +503,21 @@ const hepsiburada = (() => {
     };
   }
 
-  async function fetchRows({ stage = 'yeni' } = {}) {
+  async function fetchRows() {
     const h = headers();
     const rows = [];
-    if (stage === 'yeni') {
+    {
       for (const item of await paged(`/orders/merchantid/${cfg.merchantId}`, h, 'Hepsiburada (paketlenecek)')) {
         const no = String(pick(item, 'orderNumber'));
         rows.push(lineToRow(item, item, {
           _key: `Hepsiburada:${no}`,
-          _ref: { lineId: pick(item, 'id', 'lineItemId'), qty: toNumber(pick(item, 'quantity')) },
+          _ref: { lineId: pick(item, 'id', 'lineItemId'), qty: toNumber(pick(item, 'quantity')), paketle: true },
           kargoAnahtari: '',
           durum: 'Paketlenecek',
         }));
       }
-    } else if (stage === 'panel') {
+    }
+    {
       for (const p of await paged(`/packages/merchantid/${cfg.merchantId}`, h, 'Hepsiburada (paketler)')) {
         const no = String(pick(p, 'packageNumber', 'id', 'barcode'));
         const code = String(pick(p, 'barcode', 'trackingNumber', 'cargoTrackingNumber', 'packageNumber'));
@@ -536,12 +529,13 @@ const hepsiburada = (() => {
     return rows;
   }
 
-  // 1 → 2: siparişin tüm kalemlerini paketler
+  // Excel'e aktarırken: paketlenmemiş siparişin tüm kalemlerini paketler
   async function advance(orders) {
     const h = headers();
     const done = [];
     const failed = [];
     for (const o of orders) {
+      if (!o.rows[0]._ref.paketle) { done.push(o.key); continue; }
       try {
         await httpJson(`${BASE}/packages/merchantid/${cfg.merchantId}`, {
           method: 'POST',
@@ -563,7 +557,7 @@ const hepsiburada = (() => {
 // KAYIT (Trendyol/Hepsiburada aktarım kaydı)
 // ======================================================================
 const store = (() => {
-  // Trendyol / Hepsiburada'da Drive'a aktarılan siparişlerin kaydı (Shopify bunu etiketle tutar).
+  // Trendyol / Hepsiburada'da Excel'e aktarılan siparişlerin kaydı (Shopify bunu etiketle tutar).
   // Railway'de kalıcı olması için DATA_DIR bir volume'a bağlanmalı (/data).
   const fs = require('fs');
   const path = require('path');
@@ -583,14 +577,16 @@ const store = (() => {
     fs.renameSync(tmp, file);
   }
 
-  const has = (key) => !!load()[key];
+  // Kanal + sipariş numarasıyla bakılır (Hepsiburada'da paketlenince paket anahtarı değişir).
+  const noKey = (o) => `${o.kanal}#${o.siparisNo}`;
+  const has = (o) => !!load()[noKey(o)];
 
   function add(orders) {
     const db = load();
     const now = new Date().toISOString();
     for (const o of orders) {
       const { rows, ...rest } = o;
-      db[o.key] = { ...rest, aktarimTarihi: now };
+      db[noKey(o)] = { ...rest, aktarimTarihi: now };
     }
     save();
   }
@@ -1254,13 +1250,13 @@ const mailer = (() => {
 })();
 
 // ======================================================================
-// SİPARİŞ AKIŞI (3 aşama)
+// SİPARİŞ AKIŞI (tek sayfa: siparişleri çek → Excel'e aktar)
 // ======================================================================
 const flow = (() => {
-  // Üç aşama:
-  //  yeni  → [Panele çek]   → panel  (Shopify etiket, Trendyol İşleme Alındı, Hepsiburada paketle)
-  //  panel → [Drive'a aktar] → drive (Google Sheet'e yaz, Shopify etiket / pazaryeri kaydı)
-  //  drive : tarih aralığıyla görüntüleme ve Excel indirme
+  //  Siparişleri çek : henüz Excel'e aktarılmamış siparişleri listeler (hiçbir şeyi değiştirmez)
+  //  Excel'e aktar   : seçilenleri Excel'e (ayarlıysa Google Sheet'e ve e-postaya) yazar;
+  //                    Shopify → "excel" etiketi; Trendyol/Hepsiburada → işleme alınır + kayıt
+  //  Aktarılanlar    : tarih aralığıyla görüntüleme + Excel'i yeniden indirme (durum değiştirmez)
   const { buildWorkbook } = excel;
   const { sendMail } = mailer;
   const ALL = { shopify: ['Shopify', shopify], trendyol: ['Trendyol', trendyol], hepsiburada: ['Hepsiburada', hepsiburada] };
@@ -1300,18 +1296,18 @@ const flow = (() => {
   const publicView = ({ rows, ...rest }) => rest;
   const sortDesc = (list) => list.sort((a, b) => new Date(b.tarih || 0) - new Date(a.tarih || 0));
 
-  async function list({ stage = 'yeni', from, to } = {}) {
+  // stage: 'bekleyen' (aktarılmamış) | 'aktarilan' (tarih aralığıyla)
+  async function list({ stage = 'bekleyen', from, to } = {}) {
     const sources = active();
     const warnings = [];
     let orders = [];
 
     const results = await Promise.allSettled(sources.map(async ([name, src]) => {
-      if (stage === 'drive' && src.usesStore) {
+      if (stage === 'aktarilan' && src.usesStore) {
         return store.list({ from, to, kanallar: [name] }).map((o) => ({ ...o, rows: [] }));
       }
-      let grouped = group(await src.fetchRows({ stage, from, to }));
-      if (stage === 'panel' && src.usesStore) grouped = grouped.filter((o) => !store.has(o.key));
-      return grouped;
+      const grouped = group(await src.fetchRows({ stage, from, to }));
+      return src.usesStore ? grouped.filter((o) => !store.has(o)) : grouped;
     }));
     results.forEach((r, i) => {
       if (r.status === 'fulfilled') orders.push(...r.value);
@@ -1322,45 +1318,20 @@ const flow = (() => {
     });
 
     orders = sortDesc(orders);
-    const sessionId = remember({ stage, from, to, orders: new Map(orders.map((o) => [o.key, o])) });
+    const sessionId = remember({ stage, orders: new Map(orders.map((o) => [o.key, o])) });
     return { sessionId, stage, orders: orders.map(publicView), warnings };
   }
 
   function take(sessionId, keys, stage) {
     const s = sessions.get(sessionId);
-    if (!s) throw new Error('Liste süresi doldu, siparişleri yeniden getirin.');
-    if (stage && s.stage !== stage) throw new Error('Bu işlem bu sekmede yapılamaz.');
+    if (!s) throw new Error('Liste süresi doldu, "Siparişleri çek"e yeniden basın.');
+    if (stage && s.stage !== stage) throw new Error('Bu işlem bu listede yapılamaz.');
     const selected = (keys || []).map((k) => s.orders.get(k)).filter(Boolean);
-    if (!selected.length) throw new Error('Seçilen siparişler bu listeden zaten işlendi; listeyi yeniden getirin.');
+    if (!selected.length) throw new Error('Seçilen siparişler zaten aktarıldı; "Siparişleri çek"e yeniden basın.');
     return { s, selected };
   }
 
   const byChannel = (orders) => orders.reduce((m, o) => ((m[o.kanal] ||= []).push(o), m), {});
-
-  // 1 → 2
-  async function advance({ sessionId, keys }) {
-    const { s, selected } = take(sessionId, keys, 'yeni');
-    const summary = {};
-    const failed = [];
-    let adresSonuc = null;
-    for (const [kanal, orders] of Object.entries(byChannel(selected))) {
-      const res = await byName[kanal].advance(orders);
-      summary[kanal] = res.done.length;
-      failed.push(...res.failed.map((f) => `${kanal} ${f}`));
-      res.done.forEach((k) => s.orders.delete(k));
-      if (res.adres) adresSonuc = res.adres;
-    }
-    return { summary, failed, adres: adresSonuc, done: Object.values(summary).reduce((a, b) => a + b, 0) };
-  }
-
-  // 2. aşamada adresleri yeniden kontrol et / düzelt (aşama değişmez; sadece Shopify)
-  async function fixAddresses({ sessionId, keys }) {
-    if (!config.adres.duzeltme) throw new Error('Adres düzeltme kapalı (ADRES_DUZELTME).');
-    const { selected } = take(sessionId, keys, 'panel');
-    const orders = selected.filter((o) => o.kanal === 'Shopify');
-    if (!orders.length) throw new Error('Seçilenler arasında Shopify siparişi yok.');
-    return { adres: await shopify.fixAddresses(orders), count: orders.length };
-  }
 
   function fileName(prefix) {
     const p = (n) => String(n).padStart(2, '0');
@@ -1383,54 +1354,59 @@ const flow = (() => {
     }
   }
 
-  // 2 → 3
-  async function exportDrive({ sessionId, keys, email = true }) {
-    if (!sheets.configured()) throw new Error('Google Sheet ayarları eksik (GOOGLE_SHEET_ID / GOOGLE_SERVICE_ACCOUNT_JSON).');
-    const { s, selected } = take(sessionId, keys, 'panel');
+  // Excel'e aktar: Excel dosyası her zaman oluşur; Google Sheet ve e-posta ayarlıysa onlar da yapılır.
+  async function exportExcel({ sessionId, keys }) {
+    const { s, selected } = take(sessionId, keys, 'bekleyen');
     const channels = active().map(([n]) => n);
     const warnings = [];
+    const exported = [];
 
-    // Önce Sheet'e yazılır; yazılamazsa hiçbir sipariş 3. aşamaya geçmez.
-    const sheet = await sheets.writeOrders(selected);
-
-    const groups = byChannel(selected);
-    for (const [kanal, orders] of Object.entries(groups)) {
-      if (byName[kanal].usesStore) {
-        store.add(orders);
-        orders.forEach((o) => s.orders.delete(o.key));
+    for (const [kanal, orders] of Object.entries(byChannel(selected))) {
+      const src = byName[kanal];
+      if (src.usesStore) {
+        // Trendyol: Created → Picking · Hepsiburada: paketlenmemişse paketle. Başarılı olanlar kaydedilir.
+        const res = await src.advance(orders);
+        const ok = orders.filter((o) => res.done.includes(o.key));
+        if (ok.length) store.add(ok);
+        exported.push(...ok);
+        if (res.failed.length) warnings.push(`${kanal} işleme alınamayan siparişler (Excel'e yazılmadı, listede kalır): ${res.failed.join('; ')}`);
       } else {
-        const res = await byName[kanal].markExported(orders);
-        res.done.forEach((k) => s.orders.delete(k));
-        if (res.failed.length) {
-          warnings.push(`${kanal} etiketlenemeyen siparişler (Sheet'e yazıldı, panelde 2. aşamada kalır): ${res.failed.join('; ')}`);
-        }
+        const res = await src.markExported(orders);
+        exported.push(...orders.filter((o) => res.done.includes(o.key)));
+        if (res.failed.length) warnings.push(`${kanal} etiketlenemeyen siparişler (Excel'e yazılmadı, listede kalır): ${res.failed.join('; ')}`);
       }
     }
+    exported.forEach((o) => s.orders.delete(o.key));
+    if (!exported.length) throw new Error('Hiçbir sipariş aktarılamadı. ' + warnings.join(' '));
 
-    const buffer = await buildWorkbook(selected, warnings, channels);
+    let sheet = null;
+    if (sheets.configured()) {
+      try { sheet = await sheets.writeOrders(exported); }
+      catch (e) { console.error(e); warnings.push(`Google Sheet'e yazılamadı: ${e.message}`); }
+    }
+
+    const ordered = sortDesc([...exported]);
+    const buffer = await buildWorkbook(ordered, warnings, channels);
     const filename = fileName('siparisler');
-    const mail = email ? await mailList({ title: "Drive'a aktarılan siparişler", orders: selected, buffer, filename, sheet, warnings }) : { skipped: true };
-    return { orderCount: selected.length, buffer, filename, sheet, mail, warnings };
+    const mail = await mailList({ title: "Excel'e aktarılan siparişler", orders: ordered, buffer, filename, sheet, warnings });
+    return { orderCount: exported.length, buffer, filename, sheet, mail, warnings };
   }
 
-  // Herhangi bir sekmeden seçilenleri sadece Excel olarak almak (durum değiştirmez)
-  async function download({ sessionId, keys, email = false }) {
-    const { s, selected } = take(sessionId, keys);
-    const channels = active().map(([n]) => n);
-    const buffer = await buildWorkbook(selected, [], channels);
-    const filename = fileName(s.stage === 'drive' ? 'aktarilanlar' : 'liste');
-    const mail = email ? await mailList({ title: 'Sipariş listesi', orders: selected, buffer, filename, warnings: [] }) : { skipped: true };
-    return { orderCount: selected.length, buffer, filename, mail, warnings: [] };
+  // Aktarılanlar listesinden seçilenleri yeniden Excel olarak almak (durum değiştirmez)
+  async function download({ sessionId, keys }) {
+    const { selected } = take(sessionId, keys);
+    const buffer = await buildWorkbook(selected, [], active().map(([n]) => n));
+    return { orderCount: selected.length, buffer, filename: fileName('aktarilanlar') };
   }
 
-  return { list, advance, exportDrive, download, fixAddresses };
+  return { list, exportExcel, download };
 })();
 
 // ======================================================================
 // OTOMATİK ADRES KONTROLÜ (yeni Shopify siparişleri, birkaç dakikada bir)
 // ======================================================================
 const oto = (() => {
-  // Yeni gelen (1. aşamadaki) Shopify siparişlerinin adresleri düzenli aralıklarla kontrol edilir.
+  // Bekleyen (Excel'e aktarılmamış) Shopify siparişlerinin adresleri düzenli aralıklarla kontrol edilir.
   // Aynı adres bir kez kontrol edildikten sonra, adres değişmedikçe tekrar haritaya sorulmaz.
   const cfg = config.adres;
   const checked = new Map(); // sipariş → kontrol edilen adresin özeti
@@ -1443,7 +1419,7 @@ const oto = (() => {
     if (calisiyor) return;
     calisiyor = true;
     try {
-      const rows = await shopify.fetchRows({ stage: 'yeni' });
+      const rows = await shopify.fetchRows({ stage: 'bekleyen' });
       const map = new Map();
       for (const r of rows) {
         if (!map.has(r._key)) map.set(r._key, { key: r._key, siparisNo: r.siparisNo, rows: [] });
@@ -1484,25 +1460,23 @@ const oto = (() => {
 const PAGE = `<!doctype html>
 <html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Esse Jeffe Otomasyon</title>
+<title>Esse Jeffe Siparişler</title>
 <style>
   :root{--ink:#2b2023;--muted:#7a6a6e;--brand:#3b2a2f;--bg:#f6f2ee;--line:#e6dcd6;--zebra:#fcfaf8;--warn:#b00020;--ok:#1d6b3a}
   *{box-sizing:border-box}
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:20px 24px;font-size:15px}
   .wrap{max-width:1900px;margin:0 auto}
-  h1{font-size:22px;margin:0 0 16px}
-  .tabs{display:flex;gap:6px;margin-bottom:-1px;flex-wrap:wrap}
-  .tab{padding:11px 18px;border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;background:#efe8e3;cursor:pointer;font-weight:600;color:var(--muted)}
-  .tab.on{background:#fff;color:var(--ink)}
-  .tab .n{display:inline-block;min-width:22px;margin-left:6px;padding:1px 7px;border-radius:999px;background:#e2d6cf;font-size:12px;text-align:center}
-  .card{background:#fff;border:1px solid var(--line);border-radius:0 12px 12px 12px;padding:20px}
-  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px}
-  button{padding:12px 18px;font-size:15px;font-weight:600;border:0;border-radius:10px;background:var(--brand);color:#fff;cursor:pointer}
+  h1{font-size:22px;margin:0 0 16px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  h1 small{font-size:12px;font-weight:400;color:var(--muted)}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+  button{padding:12px 20px;font-size:15px;font-weight:600;border:0;border-radius:10px;background:var(--brand);color:#fff;cursor:pointer}
   button.ghost{background:#efe8e3;color:var(--ink)}
+  button.link{background:none;color:var(--muted);padding:8px 4px;text-decoration:underline;font-weight:500}
   button:disabled{opacity:.5;cursor:not-allowed}
   input[type=date]{padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit}
-  label.chk{display:flex;align-items:center;gap:6px;color:var(--muted)}
-  .scroll{overflow:auto;max-height:calc(100vh - 250px);border:1px solid var(--line);border-radius:10px}
+  .count{color:var(--muted)}
+  .scroll{overflow:auto;max-height:calc(100vh - 230px);border:1px solid var(--line);border-radius:10px}
   table{border-collapse:collapse;width:100%;font-size:15px;min-width:1400px}
   th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;line-height:1.45}
   th{background:#f3ece7;font-weight:700;position:sticky;top:0;z-index:1;white-space:nowrap}
@@ -1515,37 +1489,36 @@ const PAGE = `<!doctype html>
   td.addr.bad{background:#fde8e8 !important;color:#8a1020;box-shadow:inset 3px 0 0 #c62828}
   .anote{display:block;margin-top:4px;font-size:12.5px;font-weight:600}
   .afix{display:block;margin-top:4px;font-size:12.5px;color:var(--ok)}
-  .knote{display:block;margin-top:4px;font-size:12.5px;color:var(--muted)}
   .sku{display:block;font-family:ui-monospace,Menlo,monospace;font-size:14px;white-space:nowrap}
   .mono{font-family:ui-monospace,Menlo,monospace;font-size:14px}
   .tags{color:#5b4a4f;min-width:200px}
   input[type=checkbox]{width:18px;height:18px}
   .empty{padding:40px;text-align:center;color:var(--muted)}
-  #hint{font-size:14px;color:var(--muted);margin-bottom:12px}
-  #msg{margin-top:12px;line-height:1.7}
+  #msg{margin-bottom:12px;line-height:1.7}
+  #msg:empty{display:none}
   .warn{color:var(--warn)} .ok{color:var(--ok)}
   a.dl{font-weight:700;color:var(--brand);margin-right:16px}
-  .hide{display:none}
+  .hide{display:none !important}
 </style></head>
 <body><div class="wrap">
-  <h1>Esse Jeffe Otomasyon <small style="font-size:12px;font-weight:400;color:var(--muted)">{{SURUM}}</small></h1>
-  <div class="tabs">
-    <div class="tab on" data-stage="yeni">1 · Yeni gelen siparişler<span class="n" id="n-yeni">–</span></div>
-    <div class="tab" data-stage="panel">2 · Panele çekilenler<span class="n" id="n-panel">–</span></div>
-    <div class="tab" data-stage="drive">3 · Etiket oluşturulanlar</div>
-  </div>
+  <h1>Esse Jeffe Siparişler <small>{{SURUM}}</small></h1>
   <div class="card">
-    <div class="bar">
-      <span id="range" class="hide"><input type="date" id="bas"> – <input type="date" id="bit"></span>
-      <button id="fetch" class="ghost">Yenile</button>
+    <div class="bar" id="barMain">
+      <button id="fetch">Siparişleri çek</button>
+      <button id="export" disabled>Excel'e aktar</button>
+      <span class="count" id="count"></span>
       <span style="flex:1"></span>
-      <label class="chk" id="mailBox"><input type="checkbox" id="mail" checked> E-posta da gönder</label>
-      <button id="fix" class="ghost hide" disabled>Adresleri düzelt</button>
-      <button id="excel" class="ghost" disabled>Excel indir</button>
-      <button id="action" disabled>Panele çek</button>
+      <button class="link" id="toPast">Önceki aktarımlar</button>
     </div>
-    <div id="hint"></div>
-    <div id="oto" style="font-size:13px;color:var(--muted);margin:-6px 0 12px"></div>
+    <div class="bar hide" id="barPast">
+      <b>Önceki aktarımlar</b>
+      <input type="date" id="bas"> – <input type="date" id="bit">
+      <button id="fetchPast" class="ghost">Getir</button>
+      <button id="excel" class="ghost" disabled>Excel indir</button>
+      <span style="flex:1"></span>
+      <button class="link" id="toMain">← Bekleyen siparişler</button>
+    </div>
+    <div id="msg"></div>
     <div class="scroll"><table>
       <thead><tr>
         <th><input type="checkbox" id="all"></th><th>Kanal</th><th>Sipariş</th><th>Tarih</th><th>Müşteri</th><th>Telefon</th>
@@ -1553,17 +1526,11 @@ const PAGE = `<!doctype html>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table></div>
-    <div id="msg"></div>
   </div>
 </div>
 <script>
 const COLS = 13;
-const STAGES = {
-  yeni:  { action: 'Panele çek', hint: 'Hiç dokunulmamış siparişler. "Panele çek": Shopify\\'da (adres düzeltme açıksa adresler kontrol edilir), sonra "etiket oluşturuldu - otomatik" etiketi eklenir, Trendyol\\'da "İşleme Alındı" yapılır, Hepsiburada\\'da paketlenip "Gönderime Hazır"a geçer.' },
-  panel: { action: "Drive'a aktar", hint: 'Panele çekilmiş siparişler. "Drive\\'a aktar": Google Sheet\\'teki "Siparişler" sayfası temizlenir, seçilenler yazılır ve 3. aşamaya geçer (Shopify\\'da "drive\\'a aktarıldı - otomatik" etiketi eklenir).' },
-  drive: { action: null, hint: 'Drive\\'a aktarılmış siparişler (sipariş tarihine göre). Bu sekmede hiçbir siparişin durumu değişmez.' },
-};
-let stage = 'yeni', session = null, orders = [], duzeltmeAcik = false;
+let mode = 'bekleyen', session = null, orders = [];
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money = (n) => n ? n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₺' : '';
@@ -1572,48 +1539,40 @@ const iso = (d) => d.toISOString().slice(0, 10);
 const empty = (t) => '<tr><td colspan="' + COLS + '" class="empty">' + t + '</td></tr>';
 $('bas').value = iso(new Date(Date.now() - 6 * 864e5)); $('bit').value = iso(new Date());
 
-function setStage(s) {
-  stage = s; session = null; orders = [];
-  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('on', x.dataset.stage === s));
-  $('range').classList.toggle('hide', s !== 'drive');
-  $('action').classList.toggle('hide', !STAGES[s].action);
-  $('action').dataset.label = STAGES[s].action || '';
-  $('mailBox').classList.toggle('hide', s === 'yeni');
-  $('fix').classList.toggle('hide', s !== 'panel' || !duzeltmeAcik);
-  $('mail').checked = s === 'panel';
-  $('fetch').textContent = s === 'drive' ? 'Getir' : 'Yenile';
-  $('hint').textContent = STAGES[s].hint;
+function setMode(m) {
+  mode = m; session = null; orders = [];
+  $('barMain').classList.toggle('hide', m !== 'bekleyen');
+  $('barPast').classList.toggle('hide', m !== 'aktarilan');
   $('msg').innerHTML = '';
-  $('rows').innerHTML = empty(s === 'drive' ? 'Tarih aralığı seçip "Getir"e basın.' : 'Yükleniyor…');
+  $('rows').innerHTML = empty(m === 'aktarilan' ? 'Tarih aralığı seçip "Getir"e basın.' : '');
   update();
-  if (s !== 'drive') load();
+  if (m === 'bekleyen') load();
 }
-document.querySelectorAll('.tab').forEach((t) => t.onclick = () => setStage(t.dataset.stage));
+$('toPast').onclick = () => setMode('aktarilan');
+$('toMain').onclick = () => setMode('bekleyen');
 
 function selected() { return [...document.querySelectorAll('.pick:checked')].map((c) => c.value); }
 function update() {
   const n = selected().length;
-  const label = $('action').dataset.label;
-  $('action').disabled = !n; $('excel').disabled = !n; $('fix').disabled = !n;
-  $('action').textContent = n ? label + ' (' + n + ')' : label;
+  $('export').disabled = !n; $('excel').disabled = !n;
+  $('export').textContent = n ? "Excel'e aktar (" + n + ')' : "Excel'e aktar";
   $('excel').textContent = n ? 'Excel indir (' + n + ')' : 'Excel indir';
+  $('count').textContent = mode === 'bekleyen' && session ? orders.length + ' bekleyen sipariş' : '';
   $('all').checked = n && n === orders.length;
   document.querySelectorAll('.pick').forEach((c) => c.closest('tr').classList.toggle('off', !c.checked));
 }
 $('all').onchange = (e) => { document.querySelectorAll('.pick').forEach((c) => c.checked = e.target.checked); update(); };
 
 function addrCell(o) {
-  const bad = stage !== 'drive' && o.adresDurum === 'sorunlu';
-  return '<td class="addr' + (bad ? ' bad' : '') + '"' + (bad ? ' title="' + esc(o.adresNot) + '"' : '') + '>' + esc(o.adres) +
+  const bad = mode === 'bekleyen' && o.adresDurum === 'sorunlu';
+  return '<td class="addr' + (bad ? ' bad' : '') + '">' + esc(o.adres) +
     (bad ? '<span class="anote">⚠ ' + esc(o.adresNot) + '</span>' : '') +
-    (stage !== 'drive' && o.adresDurum === 'kurum' ? '<span class="knote">' + esc(o.adresNot) + '</span>' : '') +
     (o.adresDuzeltildi ? '<span class="afix">✓ adres otomatik düzeltildi</span>' : '') + '</td>';
 }
 
 function render() {
-  if (stage !== 'drive') $('n-' + stage).textContent = orders.length;
   if (!orders.length) {
-    $('rows').innerHTML = empty({ yeni: 'Yeni sipariş yok.', panel: 'Panele çekilmiş sipariş yok.', drive: 'Bu tarih aralığında aktarılmış sipariş yok.' }[stage]);
+    $('rows').innerHTML = empty(mode === 'bekleyen' ? "Excel'e aktarılmamış sipariş yok." : 'Bu tarih aralığında aktarılmış sipariş yok.');
     return update();
   }
   $('rows').innerHTML = orders.map((o) =>
@@ -1635,104 +1594,58 @@ async function call(url, opt) {
   return d;
 }
 const post = (url, body) => call(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-const warnHtml = (w) => w && w.length ? '<p class="warn">' + w.map(esc).join('<br>') + '</p>' : '';
+const warnHtml = (w) => w && w.length ? '<div class="warn">' + w.map(esc).join('<br>') + '</div>' : '';
 
-async function load() {
-  $('fetch').disabled = true;
-  const my = stage;
+async function load(keepMsg) {
+  const btn = mode === 'bekleyen' ? $('fetch') : $('fetchPast');
+  const my = mode;
+  btn.disabled = true; btn.textContent = 'Çekiliyor…';
+  if (!keepMsg) $('msg').innerHTML = '';
   try {
-    const q = my === 'drive' ? '&bas=' + $('bas').value + '&bit=' + $('bit').value : '';
-    const d = await call('/api/liste?asama=' + my + q);
-    if (my !== stage) return;
+    const q = my === 'aktarilan' ? '&bas=' + $('bas').value + '&bit=' + $('bit').value : '';
+    const d = await call('/api/liste?liste=' + my + q);
+    if (my !== mode) return;
     session = d.sessionId; orders = d.orders; render();
-    $('msg').innerHTML = warnHtml(d.warnings);
-  } catch (e) { if (my === stage) { $('rows').innerHTML = empty(''); $('msg').innerHTML = warnHtml([e.message]); } }
-  finally { $('fetch').disabled = false; }
+    $('msg').innerHTML += warnHtml(d.warnings);
+  } catch (e) { if (my === mode) { $('rows').innerHTML = empty(''); $('msg').innerHTML += warnHtml([e.message]); } }
+  finally { btn.disabled = false; btn.textContent = my === 'bekleyen' ? 'Siparişleri çek' : 'Getir'; }
 }
-$('fetch').onclick = load;
+$('fetch').onclick = () => load();
+$('fetchPast').onclick = () => load();
 
-function busy(btn, on) { btn.disabled = on; if (on) btn.textContent = 'İşleniyor…'; else update(); }
 function mailText(m) {
   if (!m) return '';
-  return m.sent ? 'E-postanıza gönderildi.' : m.error ? '<span class="warn">E-posta gönderilemedi: ' + esc(m.error) + '</span>' : '';
+  return m.sent ? ' E-postanıza gönderildi.' : m.error ? ' <span class="warn">E-posta gönderilemedi: ' + esc(m.error) + '</span>' : '';
 }
 
-$('action').onclick = async () => {
-  const keys = selected();
-  busy($('action'), true);
+$('export').onclick = async () => {
+  const btn = $('export');
+  btn.disabled = true; btn.textContent = 'Aktarılıyor…';
   try {
-    if (stage === 'yeni') {
-      const d = await post('/api/panele-cek', { sessionId: session, keys });
-      const parts = Object.entries(d.summary).map(([k, v]) => k + ': ' + v);
-      const a = d.adres;
-      const adresHtml = a ? '<br>Adres kontrolü: ' + a.duzeltildi.length + ' adres düzeltildi' +
-        (a.sorunlu.length ? ', <span class="warn">' + a.sorunlu.length + ' adreste sorun var (2. sekmede kırmızı)</span>' : '') +
-        warnHtml(a.hata.map((x) => 'Adres güncellenemedi: ' + x)) : '';
-      $('msg').innerHTML = '<span class="ok">' + d.done + ' sipariş panele çekildi.</span> ' + esc(parts.join(' · ')) + adresHtml + warnHtml(d.failed);
-    } else {
-      const d = await post('/api/drive', { sessionId: session, keys, email: $('mail').checked });
-      $('msg').innerHTML = '<span class="ok">' + d.orderCount + " sipariş Drive'a aktarıldı.</span> " + mailText(d.mail) + warnHtml(d.warnings) +
-        '<br>' + (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
-        '<a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>';
-    }
-    const done = new Set(keys);
-    const msg = $('msg').innerHTML;
-    await load();
-    $('msg').innerHTML = msg + $('msg').innerHTML;
-  } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
-  finally { busy($('action'), false); }
-};
-
-function adresMsg(a) {
-  if (!a) return '';
-  return 'Adres kontrolü: ' + a.duzeltildi.length + ' adres düzeltildi' +
-    (a.sorunlu.length ? ', <span class="warn">' + a.sorunlu.length + ' adreste sorun var (kırmızı)</span>' : '') +
-    warnHtml(a.hata.map((x) => 'Adres güncellenemedi: ' + x));
-}
-
-$('fix').onclick = async () => {
-  busy($('fix'), true);
-  try {
-    const d = await post('/api/adres-duzelt', { sessionId: session, keys: selected() });
-    const msg = adresMsg(d.adres);
-    await load();
-    $('msg').innerHTML = msg + $('msg').innerHTML;
-  } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
-  finally { $('fix').textContent = 'Adresleri düzelt'; update(); }
+    const d = await post('/api/excel-aktar', { sessionId: session, keys: selected() });
+    $('msg').innerHTML = '<span class="ok">' + d.orderCount + " sipariş Excel'e aktarıldı.</span>" + mailText(d.mail) +
+      '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>' +
+      (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
+      warnHtml(d.warnings);
+    window.location.href = d.download;
+    await load(true);
+  } catch (e) { $('msg').innerHTML = warnHtml([e.message]); update(); }
 };
 
 $('excel').onclick = async () => {
-  busy($('excel'), true);
   try {
-    const d = await post('/api/excel', { sessionId: session, keys: selected(), email: stage !== 'yeni' && $('mail').checked });
-    $('msg').innerHTML = '<span class="ok">' + d.orderCount + ' sipariş Excel\\'e alındı.</span> ' + mailText(d.mail) + '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>';
+    const d = await post('/api/excel', { sessionId: session, keys: selected() });
     window.location.href = d.download;
   } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
-  finally { busy($('excel'), false); }
 };
 
-async function otoDurum() {
-  try {
-    const d = await call('/api/oto-durum');
-    duzeltmeAcik = !!d.duzeltme;
-    $('fix').classList.toggle('hide', stage !== 'panel' || !duzeltmeAcik);
-    if (!d.duzeltme) { $('oto').textContent = 'Adres düzeltme kapalı.'; return; }
-    if (!d.acik) { $('oto').textContent = 'Otomatik adres kontrolü kapalı.'; return; }
-    const son = d.son ? new Date(d.son).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) : 'henüz çalışmadı';
-    $('oto').innerHTML = 'Otomatik adres kontrolü: her ' + d.aralikDk + ' dakikada bir · son çalışma ' + son +
-      ' · açılıştan beri ' + d.duzeltilen + ' adres düzeltildi' + (d.hata ? ' · <span class="warn">' + esc(d.hata) + '</span>' : '');
-  } catch {}
-}
-otoDurum(); setInterval(otoDurum, 60000);
-
-setStage('yeni');
-call('/api/liste?asama=panel').then((d) => $('n-panel').textContent = d.orders.length).catch(() => {});
+setMode('bekleyen');
 </script></body></html>`;
 
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-09 · v8 (adres düzeltme kapalı)';
+const SURUM = '2026-10-18 · v9 (tek sayfa: çek → Excel)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1784,28 +1697,16 @@ const exclusive = (fn) => async (req) => {
 const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
 
 app.get('/api/liste', handle(async (req) => {
-  const stage = ['yeni', 'panel', 'drive'].includes(req.query.asama) ? req.query.asama : 'yeni';
+  const stage = req.query.liste === 'aktarilan' ? 'aktarilan' : 'bekleyen';
   const from = isDate(req.query.bas) ? req.query.bas : undefined;
   const to = isDate(req.query.bit) ? req.query.bit : undefined;
-  if (stage === 'drive' && (!from || !to)) throw new Error('Başlangıç ve bitiş tarihi seçin.');
+  if (stage === 'aktarilan' && (!from || !to)) throw new Error('Başlangıç ve bitiş tarihi seçin.');
   return flow.list({ stage, from, to });
 }));
 
-app.post('/api/panele-cek', handle(exclusive(async (req) => {
+app.post('/api/excel-aktar', handle(exclusive(async (req) => {
   const { sessionId, keys } = req.body || {};
-  return flow.advance({ sessionId, keys });
-})));
-
-app.get('/api/oto-durum', (_req, res) => res.json(oto.durum));
-
-app.post('/api/adres-duzelt', handle(exclusive(async (req) => {
-  const { sessionId, keys } = req.body || {};
-  return flow.fixAddresses({ sessionId, keys });
-})));
-
-app.post('/api/drive', handle(exclusive(async (req) => {
-  const { sessionId, keys, email } = req.body || {};
-  const out = await flow.exportDrive({ sessionId, keys, email: email !== false });
+  const out = await flow.exportExcel({ sessionId, keys });
   return {
     orderCount: out.orderCount, warnings: out.warnings, mail: out.mail,
     sheetUrl: out.sheet && out.sheet.url, download: keep(out.buffer, out.filename),
@@ -1813,10 +1714,12 @@ app.post('/api/drive', handle(exclusive(async (req) => {
 })));
 
 app.post('/api/excel', handle(async (req) => {
-  const { sessionId, keys, email } = req.body || {};
-  const out = await flow.download({ sessionId, keys, email: !!email });
-  return { orderCount: out.orderCount, mail: out.mail, download: keep(out.buffer, out.filename) };
+  const { sessionId, keys } = req.body || {};
+  const out = await flow.download({ sessionId, keys });
+  return { orderCount: out.orderCount, download: keep(out.buffer, out.filename) };
 }));
+
+app.get('/api/oto-durum', (_req, res) => res.json(oto.durum));
 
 app.get('/indir/:id', (req, res) => {
   const f = files.get(req.params.id);
@@ -1834,4 +1737,3 @@ app.listen(config.port, () => {
   console.log(`Panel hazır: port ${config.port}`);
   oto.baslat();
 });
-

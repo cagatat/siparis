@@ -1,14 +1,19 @@
 # Esse Jeffe Otomasyon
 
-Panel üç aşamadan oluşur:
+Panel tek sayfadır, iki buton vardır:
 
-| Aşama | Ne var | Buton | Butonun yaptığı |
-|---|---|---|---|
-| 1 · Yeni gelen siparişler | Hiç dokunulmamış siparişler | **Panele çek** | Shopify: `etiket oluşturuldu - otomatik` etiketi · Trendyol: "İşleme Alındı" · Hepsiburada: paketlenip "Gönderime Hazır" |
-| 2 · Panele çekilenler | 1. aşamadan çekilenler | **Drive'a aktar** (ayrıca **Adresleri düzelt**: seçilenlerin adres kontrolünü yeniden çalıştırır, aşamayı değiştirmez) | Google Sheet'teki "Siparişler" sayfasını temizleyip seçilenleri yazar, e-posta gönderir · Shopify: `drive'a aktarıldı - otomatik` etiketi · Trendyol/Hepsiburada: sistem kaydına alınır |
-| 3 · Etiket oluşturulanlar | Drive'a aktarılanlar (tarih aralığıyla) | **Excel indir** | Hiçbir şeyi değiştirmez |
+| Buton | Ne yapar |
+|---|---|
+| **Siparişleri çek** | Henüz Excel'e aktarılmamış siparişleri listeler. Hiçbir şeyi değiştirmez. Sayfa açılınca kendiliğinden de çalışır. |
+| **Excel'e aktar** | Seçilen siparişleri Excel dosyasına yazar ve dosyayı indirir. Shopify: siparişe `excel` etiketi eklenir (tek etiket). Trendyol: "İşleme Alındı" yapılır · Hepsiburada: paketlenip "Gönderime Hazır" olur; ikisi de sistem kaydına alınır. Google Sheet ve e-posta ayarlıysa onlar da yapılır, ayarlı değilse atlanır. |
 
-**Shopify adres kontrolü** (şu an KAPALI; açmak için Railway'de `ADRES_DUZELTME=evet`): yeni gelen siparişlerde 5 dakikada bir otomatik çalışır; "Panele çek" ve 2. sekmedeki "Adresleri düzelt" sırasında da tekrar kontrol eder. Düzeltme hangi aşamada yapılırsa yapılsın siparişe `adres düzeltildi - otomatik` etiketi eklenir. Sorunlu adresler 1. ve 2. sekmede kırmızı görünür. Ödeme formundaki alanlar şöyle okunur:
+Sağ üstteki **Önceki aktarımlar** ile tarih aralığı seçip daha önce aktarılanları görebilir ve
+Excel'ini yeniden indirebilirsiniz (durum değiştirmez).
+
+Eski sürümlerden kalan etiketler: `drive'a aktarıldı - otomatik` ve `etiketi çıkarıldı - otomatik`
+aktarılmış sayılır; `etiket oluşturuldu - otomatik` olanlar hâlâ bekleyen listesinde görünür.
+
+**Shopify adres kontrolü** (şu an KAPALI; açmak için Railway'de `ADRES_DUZELTME=evet`): bekleyen siparişlerde 5 dakikada bir otomatik çalışır. Düzeltilen siparişe `adres düzeltildi - otomatik` etiketi eklenir. Sorunlu adresler listede kırmızı görünür. Ödeme formundaki alanlar şöyle okunur:
 "Adres" = mahalle, sokak, kapı no · "Apartman, daire vb." = ilçe · "Şehir" = il.
 - "Apartman, daire vb." alanına (ilçe) dokunulmaz. Boşsa ve ilçe adres satırında ya da Şehir alanında yazıyorsa oraya taşınır;
   Şehir alanında "Adana Yüreğir" gibi fazlalık varsa sadece il adı bırakılır.
@@ -22,15 +27,12 @@ Panel üç aşamadan oluşur:
   Haritadan bulunan mahalle ancak sonuç aynı sokak + aynı ilçeye düşüyorsa eklenir.
 - Okul, hastane, üniversite gibi kurum adreslerine dokunulmaz.
 - Google Maps hata verirse (faturalandırma, kota vb.) arama otomatik olarak OpenStreetMap'e geçer.
-- Değişiklik yapılan siparişlere `adres düzeltildi - otomatik` etiketi eklenir; 2. sekmede yeşil not olarak görünür.
-- Mahalle bulunamayan ya da il/ilçe/mahalle uyuşmayan adresler 2. sekmede kırmızı görünür, sebebi altında yazar.
+- Değişiklik yapılan siparişlere `adres düzeltildi - otomatik` etiketi eklenir; listede yeşil not olarak görünür.
+- Mahalle bulunamayan ya da il/ilçe/mahalle uyuşmayan adresler listede kırmızı görünür, sebebi altında yazar.
 - Mahalle listesi: `turkey-neighbourhoods` paketi. Harita: `GOOGLE_MAPS_API_KEY` varsa Google Maps, yoksa OpenStreetMap.
 
-Her sekmede siparişler tek satırdır; SKU'lar alt alta yazılır, siparişten çıkarılmış ya da
+Her sipariş tek satırdır; SKU'lar alt alta yazılır, siparişten çıkarılmış ya da
 değiştirilmiş ürünler listelenmez. Adres ve Shopify etiketleri (notlarınız) da görünür.
-Her sekmede "Excel indir" ile seçilenleri durum değiştirmeden Excel olarak alabilirsiniz.
-
-Önceki sürümde `etiketi çıkarıldı - otomatik` etiketi almış siparişler 3. aşamada görünür.
 
 Butonlar onay sormadan çalışır. Trendyol ve Hepsiburada'daki durum değişiklikleri geri
 alınamaz; basmadan önce seçimleri kontrol edin.
@@ -53,7 +55,7 @@ alınamaz; basmadan önce seçimleri kontrol edin.
 5. Adrese girince tarayıcı kullanıcı adı/şifre soracak: `PANEL_USER` / `PANEL_PASSWORD`.
 
 ### 3. Kalıcı kayıt (volume)
-Trendyol ve Hepsiburada'da etiket olmadığı için, Drive'a aktarılan siparişlerin kaydı
+Trendyol ve Hepsiburada'da etiket olmadığı için, Excel'e aktarılan siparişlerin kaydı
 sunucuda bir dosyada tutulur. Güncellemelerde silinmemesi için:
 1. Railway'de servise sağ tıklayın (ya da Ctrl/Cmd + K) → **Attach volume / Volume ekle**.
 2. Mount path olarak `/data` yazın.
