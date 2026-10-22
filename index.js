@@ -150,11 +150,7 @@ const shopify = (() => {
     return data.data;
   }
 
-  const ORDERS = `
-  query Orders($cursor: String, $q: String!) {
-    orders(first: 50, after: $cursor, sortKey: CREATED_AT, reverse: true, query: $q) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
+  const ORDER_FIELDS = `
         id legacyResourceId name createdAt cancelledAt tags
         displayFulfillmentStatus paymentGatewayNames phone
         customer { firstName lastName }
@@ -164,8 +160,12 @@ const shopify = (() => {
             title sku quantity currentQuantity unfulfilledQuantity
             originalUnitPriceSet { shopMoney { amount } }
           }
-        }
-      }
+        }`;
+  const ORDERS = `
+  query Orders($cursor: String, $q: String!) {
+    orders(first: 50, after: $cursor, sortKey: CREATED_AT, reverse: true, query: $q) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ${ORDER_FIELDS} }
     }
   }`;
 
@@ -192,21 +192,9 @@ const shopify = (() => {
 
   const q = (t) => `tag:"${t.replace(/"/g, '')}"`;
 
-  function dateRange(from, to) {
-    const parts = [];
-    if (from) parts.push(`created_at:>=${from}`);
-    if (to) {
-      const next = new Date(to + 'T00:00:00Z');
-      next.setUTCDate(next.getUTCDate() + 1);
-      parts.push(`created_at:<${next.toISOString().slice(0, 10)}`);
-    }
-    return parts;
-  }
-
   // Shopify araması kaba filtre; kesin ayrım aşağıda etiketlere bakılarak yapılır.
   // (Eski Drive etiketi kesme işareti içerdiği için aramaya konmaz, kodda elenir.)
-  function buildQuery({ stage, from, to }) {
-    if (stage === 'aktarilan') return dateRange(from, to).join(' AND ');
+  function buildQuery() {
     return `status:open AND (fulfillment_status:unfulfilled OR fulfillment_status:partial)` +
       [T.excel, T.eski].map((t) => ` AND NOT ${q(t)}`).join('');
   }
@@ -221,17 +209,9 @@ const shopify = (() => {
     return [a.address1, a.address2, a.city, a.province, a.zip].filter(Boolean).join(', ');
   }
 
-  async function fetchRows({ stage = 'bekleyen', from, to } = {}) {
-    checkConfig();
-    const query = buildQuery({ stage, from, to });
-    const rows = [];
-    let cursor = null;
-    do {
-      const page = (await gql(ORDERS, { cursor, q: query })).orders;
-      for (const o of page.nodes) {
+  // Bir siparişin ürün satırları (stage: 'bekleyen' → gönderilmemiş adet, 'aktarilan' → güncel adet)
+  async function orderRows(o, stage, rows) {
         const tags = o.tags || [];
-        if (!inStage(stage, tags)) continue;
-        if (stage === 'bekleyen' && o.cancelledAt) continue;
         const customer = o.shippingAddress?.name || [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ');
         // Adres kontrolü (sadece okuma; düzeltmeyi otomatik adres kontrolü yapar)
         const ak = stage === 'aktarilan' || !config.adres.duzeltme ? null : await adres.check(o.shippingAddress);
@@ -264,10 +244,52 @@ const shopify = (() => {
             adresDuzeltildi: tags.includes(T.adres),
           });
         }
+  }
+
+  async function fetchRows({ stage = 'bekleyen' } = {}) {
+    checkConfig();
+    const query = buildQuery();
+    const rows = [];
+    let cursor = null;
+    do {
+      const page = (await gql(ORDERS, { cursor, q: query })).orders;
+      for (const o of page.nodes) {
+        if (!inStage(stage, o.tags || [])) continue;
+        if (stage === 'bekleyen' && o.cancelledAt) continue;
+        await orderRows(o, stage, rows);
       }
       cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
     } while (cursor);
     return rows;
+  }
+
+  // Bir aktarımdaki siparişler (kimlikleriyle; durum ne olursa olsun)
+  async function fetchByIds(ids) {
+    checkConfig();
+    const rows = [];
+    for (let i = 0; i < ids.length; i += 100) {
+      const d = await gql(`query($ids: [ID!]!) { nodes(ids: $ids) { ... on Order { ${ORDER_FIELDS} } } }`, { ids: ids.slice(i, i + 100) });
+      for (const o of d.nodes || []) if (o && o.id) await orderRows(o, 'aktarilan', rows);
+    }
+    return rows;
+  }
+
+  // Aktarım listesi (numara, zaman, siparişler) uygulamanın gizli alanında tutulur: Shopify yönetiminde görünmez,
+  // sunucu yeniden kurulsa da kaybolmaz.
+  const AKTARIM_NS = 'esse_siparis', AKTARIM_KEY = 'aktarimlar';
+  async function aktarimlariOku() {
+    checkConfig();
+    const d = await gql(`{ currentAppInstallation { id metafield(namespace: "${AKTARIM_NS}", key: "${AKTARIM_KEY}") { value } } }`);
+    const ai = d.currentAppInstallation;
+    let liste = [];
+    try { liste = JSON.parse(ai.metafield?.value || '[]'); } catch { liste = []; }
+    return { ownerId: ai.id, liste: Array.isArray(liste) ? liste : [] };
+  }
+  async function aktarimlariYaz(ownerId, liste) {
+    const res = await gql(`mutation($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { userErrors { field message } } }`,
+      { m: [{ ownerId, namespace: AKTARIM_NS, key: AKTARIM_KEY, type: 'json', value: JSON.stringify(liste) }] });
+    const errs = res.metafieldsSet.userErrors;
+    if (errs.length) throw new Error('aktarım kaydı yazılamadı: ' + errs.map((e) => e.message).join(', '));
   }
 
   // Siparişlere etiket ekler. orders: [{ key, siparisNo, rows }]
@@ -336,7 +358,7 @@ const shopify = (() => {
   // Excel'e aktarıldı: tek etiket
   const markExported = (orders) => addTag(orders, T.excel);
 
-  return { fetchRows, markExported, fixAddresses, usesStore: false };
+  return { fetchRows, fetchByIds, markExported, fixAddresses, aktarimlariOku, aktarimlariYaz, usesStore: false };
 })();
 
 // ======================================================================
@@ -599,7 +621,9 @@ const store = (() => {
       (!from || day(o.tarih || o.aktarimTarihi) >= from) && (!to || day(o.tarih || o.aktarimTarihi) <= to));
   }
 
-  return { has, add, list };
+  const get = (k) => load()[k] || null;
+
+  return { has, add, list, get, noKey };
 })();
 
 // ======================================================================
@@ -1192,7 +1216,7 @@ const sheets = (() => {
     return tabId;
   }
 
-  async function writeOrders(orders) {
+  async function writeOrders(orders, etiket) {
     if (!cfg.sheetId || !cfg.serviceAccount) return { skipped: true };
     let gid;
     try {
@@ -1206,7 +1230,7 @@ const sheets = (() => {
       timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
     });
     const values = orders.map((o) => {
-      const r = { aktarim: stamp, ...excel.toRecord(o) };
+      const r = { aktarim: etiket || stamp, ...excel.toRecord(o) };
       return cols.map((c) => r[c.key] ?? '');
     });
     const n = values.length;
@@ -1305,17 +1329,53 @@ const flow = (() => {
   const publicView = ({ rows, ...rest }) => rest;
   const sortDesc = (list) => list.sort((a, b) => new Date(b.tarih || 0) - new Date(a.tarih || 0));
 
-  // stage: 'bekleyen' (aktarılmamış) | 'aktarilan' (tarih aralığıyla)
-  async function list({ stage = 'bekleyen', from, to } = {}) {
+  // ---- Aktarımlar: her "Excel'e aktar" numaralı bir aktarımdır (no, zaman, siparişler) ----
+  // Liste Shopify açıksa uygulamanın gizli alanında, değilse DATA_DIR/aktarimlar.json'da tutulur.
+  const fs = require('fs');
+  const path = require('path');
+  const aktarimDosyasi = path.join(config.dataDir, 'aktarimlar.json');
+  async function aktarimlar() {
+    if (config.sources.includes('shopify')) return shopify.aktarimlariOku();
+    try { return { liste: JSON.parse(fs.readFileSync(aktarimDosyasi, 'utf8')) }; } catch { return { liste: [] }; }
+  }
+  async function aktarimlariKaydet(kayit, liste) {
+    // Kayıt boyutu sınırlı: en eski aktarımlar düşülür (≈ son birkaç yüz aktarım kalır)
+    while (liste.length > 1 && JSON.stringify(liste).length > 90000) liste.shift();
+    if (config.sources.includes('shopify')) return shopify.aktarimlariYaz(kayit.ownerId, liste);
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(aktarimDosyasi, JSON.stringify(liste));
+  }
+  const trZaman = (iso) => new Date(iso).toLocaleString('tr-TR', {
+    timeZone: 'Europe/Istanbul', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const aktarimEtiketi = (a) => `#${a.no} · ${trZaman(a.zaman)}`;
+  const trGun = (iso) => new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Europe/Istanbul' });
+
+  // Seçilen günün aktarımları (yeniden eskiye)
+  async function aktarimListesi({ tarih } = {}) {
+    const { liste } = await aktarimlar();
+    return liste.filter((a) => !tarih || trGun(a.zaman) === tarih).reverse()
+      .map((a) => ({ no: a.no, zaman: a.zaman, adet: (a.siparisler || []).length }));
+  }
+
+  // stage: 'bekleyen' (aktarılmamış) | 'aktarim' (bir aktarımın siparişleri, no ile)
+  async function list({ stage = 'bekleyen', no } = {}) {
     const sources = active();
     const warnings = [];
     let orders = [];
+    let aktarim = null;
+    if (stage === 'aktarim') {
+      aktarim = (await aktarimlar()).liste.find((a) => a.no === Number(no));
+      if (!aktarim) throw new Error(`#${no} numaralı aktarım bulunamadı.`);
+    }
 
     const results = await Promise.allSettled(sources.map(async ([name, src]) => {
-      if (stage === 'aktarilan' && src.usesStore) {
-        return store.list({ from, to, kanallar: [name] }).map((o) => ({ ...o, rows: [] }));
+      if (aktarim) {
+        const benim = (aktarim.siparisler || []).filter((x) => (x.kanal || 'Shopify') === name);
+        if (!benim.length) return [];
+        if (src.usesStore) return benim.map((x) => store.get(x.k)).filter(Boolean).map((o) => ({ ...o, rows: [] }));
+        return group(await src.fetchByIds(benim.map((x) => x.id)));
       }
-      const grouped = group(await src.fetchRows({ stage, from, to }));
+      const grouped = group(await src.fetchRows({ stage }));
       return src.usesStore ? grouped.filter((o) => !store.has(o)) : grouped;
     }));
     results.forEach((r, i) => {
@@ -1326,9 +1386,10 @@ const flow = (() => {
       }
     });
 
-    orders = sortDesc(orders);
-    const sessionId = remember({ stage, orders: new Map(orders.map((o) => [o.key, o])) });
-    return { sessionId, stage, orders: orders.map(publicView), warnings };
+    orders = aktarim ? excel.sortBySku(orders) : sortDesc(orders);
+    const sessionId = remember({ stage, aktarim, orders: new Map(orders.map((o) => [o.key, o])) });
+    return { sessionId, stage, aktarim: aktarim && { no: aktarim.no, zaman: aktarim.zaman, etiket: aktarimEtiketi(aktarim) },
+      orders: orders.map(publicView), warnings };
   }
 
   function take(sessionId, keys, stage) {
@@ -1369,6 +1430,9 @@ const flow = (() => {
     const channels = active().map(([n]) => n);
     const warnings = [];
     const exported = [];
+    // Aktarım numarası: listeyi okuyamazsak hiçbir siparişe dokunmadan dururuz
+    const kayit = await aktarimlar();
+    const aktarim = { no: kayit.liste.reduce((m, a) => Math.max(m, Number(a.no) || 0), 0) + 1, zaman: new Date().toISOString(), siparisler: [] };
 
     for (const [kanal, orders] of Object.entries(byChannel(selected))) {
       const src = byName[kanal];
@@ -1388,27 +1452,33 @@ const flow = (() => {
     exported.forEach((o) => s.orders.delete(o.key));
     if (!exported.length) throw new Error('Hiçbir sipariş aktarılamadı. ' + warnings.join(' '));
 
+    aktarim.siparisler = exported.map((o) => (byName[o.kanal].usesStore
+      ? { kanal: o.kanal, k: store.noKey(o), ad: o.siparisNo } : { id: o.rows[0]._ref.gid, ad: o.siparisNo }));
+    try { await aktarimlariKaydet(kayit, [...kayit.liste, aktarim]); }
+    catch (e) { console.error(e); warnings.push(`Aktarım #${aktarim.no} geçmişe kaydedilemedi (${e.message}); Excel'i şimdi indirin.`); }
+    const etiket = aktarimEtiketi(aktarim);
+
     let sheet = null;
     const ordered = excel.sortBySku(exported);
     if (sheets.configured()) {
-      try { sheet = await sheets.writeOrders(ordered); }
+      try { sheet = await sheets.writeOrders(ordered, etiket); }
       catch (e) { console.error(e); warnings.push(`Google Sheet'e yazılamadı: ${e.message}`); }
     }
 
     const buffer = await buildWorkbook(ordered, warnings, channels);
-    const filename = fileName('siparisler');
-    const mail = await mailList({ title: "Excel'e aktarılan siparişler", orders: ordered, buffer, filename, sheet, warnings });
-    return { orderCount: exported.length, buffer, filename, sheet, mail, warnings };
+    const filename = fileName(`aktarim-${aktarim.no}`);
+    const mail = await mailList({ title: `Aktarım ${etiket}`, orders: ordered, buffer, filename, sheet, warnings });
+    return { orderCount: exported.length, aktarim: { no: aktarim.no, zaman: aktarim.zaman, etiket }, buffer, filename, sheet, mail, warnings };
   }
 
   // Aktarılanlar listesinden seçilenleri yeniden Excel olarak almak (durum değiştirmez)
   async function download({ sessionId, keys }) {
-    const { selected } = take(sessionId, keys);
+    const { s, selected } = take(sessionId, keys);
     const buffer = await buildWorkbook(excel.sortBySku(selected), [], active().map(([n]) => n));
-    return { orderCount: selected.length, buffer, filename: fileName('aktarilanlar') };
+    return { orderCount: selected.length, buffer, filename: fileName(s.aktarim ? `aktarim-${s.aktarim.no}` : 'liste') };
   }
 
-  return { list, exportExcel, download };
+  return { list, exportExcel, download, aktarimListesi };
 })();
 
 // ======================================================================
@@ -1510,6 +1580,10 @@ const PAGE = `<!doctype html>
   .warn{color:var(--warn)} .ok{color:var(--ok)}
   a.dl{font-weight:700;color:var(--brand);margin-right:16px}
   .hide{display:none !important}
+  .batches{display:flex;flex-wrap:wrap;gap:6px}
+  button.chip{padding:6px 12px;border-radius:999px;background:#efe8e3;color:var(--ink);font-weight:600}
+  button.chip.on{background:var(--brand);color:#fff}
+  .muted{color:var(--muted)}
   body.gomulu{padding:8px}
   body.gomulu h1{font-size:0;margin:0 0 6px}
   body.gomulu h1 small{font-size:11px}
@@ -1526,10 +1600,10 @@ const PAGE = `<!doctype html>
     </div>
     <div class="bar hide" id="barPast">
       <b>Önceki aktarımlar</b>
-      <input type="date" id="bas"> – <input type="date" id="bit">
-      <button id="fetchPast" class="ghost">Getir</button>
-      <button id="excel" class="ghost" disabled>Excel indir</button>
+      <input type="date" id="gun" aria-label="Aktarım günü">
+      <span id="batches" class="batches"></span>
       <span style="flex:1"></span>
+      <button id="excel" class="ghost" disabled>Excel indir</button>
       <button class="link" id="toMain">← Bekleyen siparişler</button>
     </div>
     <div id="msg"></div>
@@ -1550,20 +1624,54 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money = (n) => n ? n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₺' : '';
 const when = (d) => d ? new Date(d).toLocaleString('tr-TR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
-const iso = (d) => d.toISOString().slice(0, 10);
+const bugun = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Istanbul' });
+const saat = (d) => new Date(d).toLocaleTimeString('tr-TR', { timeZone: 'Europe/Istanbul', hour: '2-digit', minute: '2-digit' });
 const empty = (t) => '<tr><td colspan="' + COLS + '" class="empty">' + t + '</td></tr>';
-$('bas').value = iso(new Date(Date.now() - 6 * 864e5)); $('bit').value = iso(new Date());
+let aktarimNo = null;
 
 function setMode(m) {
   mode = m; session = null; orders = [];
   $('barMain').classList.toggle('hide', m !== 'bekleyen');
-  $('barPast').classList.toggle('hide', m !== 'aktarilan');
+  $('barPast').classList.toggle('hide', m !== 'aktarim');
   $('msg').innerHTML = '';
-  $('rows').innerHTML = empty(m === 'aktarilan' ? 'Tarih aralığı seçip "Getir"e basın.' : '');
+  $('rows').innerHTML = empty('');
   update();
   if (m === 'bekleyen') load();
+  else { if (!$('gun').value) $('gun').value = bugun(); gunuYukle(); }
 }
-$('toPast').onclick = () => setMode('aktarilan');
+$('toPast').onclick = () => setMode('aktarim');
+
+// Seçilen günün aktarımları: her biri bir düğme (#no · saat · adet); en sonuncusu açılır
+async function gunuYukle() {
+  session = null; orders = []; aktarimNo = null; update();
+  $('batches').innerHTML = '<span class="muted">Yükleniyor…</span>';
+  $('rows').innerHTML = empty('');
+  try {
+    const d = await call('api/aktarimlar?tarih=' + $('gun').value);
+    if (!d.aktarimlar.length) {
+      $('batches').innerHTML = '<span class="muted">Bu gün aktarım yok.</span>';
+      $('rows').innerHTML = empty('Başka bir gün seçin.');
+      return;
+    }
+    $('batches').innerHTML = d.aktarimlar.map((a) =>
+      '<button class="chip" data-no="' + a.no + '">#' + a.no + ' · ' + saat(a.zaman) + ' · ' + a.adet + ' sipariş</button>').join('');
+    document.querySelectorAll('button.chip').forEach((b) => b.onclick = () => aktarimiAc(Number(b.dataset.no)));
+    aktarimiAc(d.aktarimlar[0].no);
+  } catch (e) { $('batches').innerHTML = ''; $('msg').innerHTML = warnHtml([e.message]); }
+}
+$('gun').onchange = gunuYukle;
+
+async function aktarimiAc(no) {
+  aktarimNo = no;
+  document.querySelectorAll('button.chip').forEach((b) => b.classList.toggle('on', Number(b.dataset.no) === no));
+  $('msg').innerHTML = ''; $('rows').innerHTML = empty('Yükleniyor…');
+  try {
+    const d = await call('api/liste?liste=aktarim&no=' + no);
+    if (mode !== 'aktarim' || aktarimNo !== no) return;
+    session = d.sessionId; orders = d.orders; render();
+    $('msg').innerHTML = '<b>Aktarım ' + esc(d.aktarim.etiket) + '</b> · ' + orders.length + ' sipariş' + warnHtml(d.warnings);
+  } catch (e) { $('rows').innerHTML = empty(''); $('msg').innerHTML = warnHtml([e.message]); }
+}
 $('toMain').onclick = () => setMode('bekleyen');
 
 function selected() { return [...document.querySelectorAll('.pick:checked')].map((c) => c.value); }
@@ -1587,7 +1695,7 @@ function addrCell(o) {
 
 function render() {
   if (!orders.length) {
-    $('rows').innerHTML = empty(mode === 'bekleyen' ? "Excel'e aktarılmamış sipariş yok." : 'Bu tarih aralığında aktarılmış sipariş yok.');
+    $('rows').innerHTML = empty(mode === 'bekleyen' ? "Excel'e aktarılmamış sipariş yok." : 'Bu aktarımdaki siparişler bulunamadı.');
     return update();
   }
   $('rows').innerHTML = orders.map((o) =>
@@ -1612,21 +1720,19 @@ const post = (url, body) => call(url, { method: 'POST', headers: { 'Content-Type
 const warnHtml = (w) => w && w.length ? '<div class="warn">' + w.map(esc).join('<br>') + '</div>' : '';
 
 async function load(keepMsg) {
-  const btn = mode === 'bekleyen' ? $('fetch') : $('fetchPast');
+  const btn = $('fetch');
   const my = mode;
   btn.disabled = true; btn.textContent = 'Çekiliyor…';
   if (!keepMsg) $('msg').innerHTML = '';
   try {
-    const q = my === 'aktarilan' ? '&bas=' + $('bas').value + '&bit=' + $('bit').value : '';
-    const d = await call('api/liste?liste=' + my + q);
+    const d = await call('api/liste?liste=bekleyen');
     if (my !== mode) return;
     session = d.sessionId; orders = d.orders; render();
     $('msg').innerHTML += warnHtml(d.warnings);
   } catch (e) { if (my === mode) { $('rows').innerHTML = empty(''); $('msg').innerHTML += warnHtml([e.message]); } }
-  finally { btn.disabled = false; btn.textContent = my === 'bekleyen' ? 'Siparişleri çek' : 'Getir'; }
+  finally { btn.disabled = false; btn.textContent = 'Siparişleri çek'; }
 }
 $('fetch').onclick = () => load();
-$('fetchPast').onclick = () => load();
 
 function mailText(m) {
   if (!m) return '';
@@ -1638,7 +1744,7 @@ $('export').onclick = async () => {
   btn.disabled = true; btn.textContent = 'Aktarılıyor…';
   try {
     const d = await post('api/excel-aktar', { sessionId: session, keys: selected() });
-    $('msg').innerHTML = '<span class="ok">' + d.orderCount + " sipariş Excel'e aktarıldı.</span>" + mailText(d.mail) +
+    $('msg').innerHTML = '<span class="ok"><b>Aktarım ' + esc(d.aktarim.etiket) + '</b>: ' + d.orderCount + " sipariş Excel'e aktarıldı.</span>" + mailText(d.mail) +
       '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>' +
       (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
       warnHtml(d.warnings);
@@ -1660,7 +1766,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-22 · v11 (Dilara panelinde sekme)';
+const SURUM = '2026-10-22 · v12 (numaralı aktarımlar)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1712,18 +1818,25 @@ const exclusive = (fn) => async (req) => {
 const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
 
 app.get('/api/liste', handle(async (req) => {
-  const stage = req.query.liste === 'aktarilan' ? 'aktarilan' : 'bekleyen';
-  const from = isDate(req.query.bas) ? req.query.bas : undefined;
-  const to = isDate(req.query.bit) ? req.query.bit : undefined;
-  if (stage === 'aktarilan' && (!from || !to)) throw new Error('Başlangıç ve bitiş tarihi seçin.');
-  return flow.list({ stage, from, to });
+  if (req.query.liste === 'aktarim') {
+    const no = Number(req.query.no);
+    if (!Number.isInteger(no) || no < 1) throw new Error('Aktarım numarası geçersiz.');
+    return flow.list({ stage: 'aktarim', no });
+  }
+  return flow.list({ stage: 'bekleyen' });
+}));
+
+// Bir günün aktarımları (no, saat, sipariş sayısı)
+app.get('/api/aktarimlar', handle(async (req) => {
+  if (!isDate(req.query.tarih)) throw new Error('Tarih seçin.');
+  return { aktarimlar: await flow.aktarimListesi({ tarih: req.query.tarih }) };
 }));
 
 app.post('/api/excel-aktar', handle(exclusive(async (req) => {
   const { sessionId, keys } = req.body || {};
   const out = await flow.exportExcel({ sessionId, keys });
   return {
-    orderCount: out.orderCount, warnings: out.warnings, mail: out.mail,
+    orderCount: out.orderCount, aktarim: out.aktarim, warnings: out.warnings, mail: out.mail,
     sheetUrl: out.sheet && out.sheet.url, download: keep(out.buffer, out.filename),
   };
 })));

@@ -17,7 +17,11 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
   (`SHOPIFY_ETIKET_EXCEL`); Trendyol → `Picking`; Hepsiburada → paketle; ikisi de `DATA_DIR/aktarilanlar.json`.
   Google Sheet ("Siparişler" sayfası, başlık hariç temizlenip yazılır) ve e-posta ayarlıysa yapılır, yoksa atlanır.
   Butonlar onay sormaz (kullanıcı isteği).
-- **Önceki aktarımlar** (aynı sayfada): tarih aralığıyla görüntüleme + Excel indirme, durum değiştirmez.
+- Her "Excel'e aktar" numaralı bir **aktarımdır** (#1, #2…; no + zaman + sipariş kimlikleri). Liste Shopify'da
+  uygulamanın gizli alanında (AppInstallation metafield `esse_siparis.aktarimlar`, json; Shopify kapalıysa
+  `DATA_DIR/aktarimlar.json`). Liste okunamazsa aktarım hiç başlamaz. Excel adı `aktarim-N_…`, Sheet'te "Aktarım" = `#N · tarih saat`.
+- **Önceki aktarımlar** (aynı sayfada): gün seçilir → o günün aktarımları (#no · saat · adet) düğme olarak → seçilenin
+  siparişleri + Excel indirme; durum değiştirmez. v12'den önceki aktarımlar numarasız olduğu için listede yok.
 - Eski etiketler: `drive'a aktarıldı - otomatik` / `etiketi çıkarıldı - otomatik` aktarılmış sayılır;
   `etiket oluşturuldu - otomatik` bekleyen sayılır.
 
