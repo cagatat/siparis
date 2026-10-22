@@ -7,8 +7,8 @@ Panel tek sayfadır, iki buton vardır:
 | **Siparişleri çek** | Henüz Excel'e aktarılmamış siparişleri listeler. Hiçbir şeyi değiştirmez. Sayfa açılınca kendiliğinden de çalışır. |
 | **Excel'e aktar** | Seçilen siparişleri Excel dosyasına yazar ve dosyayı indirir. Shopify: siparişe `excel` etiketi eklenir (tek etiket). Trendyol: "İşleme Alındı" yapılır · Hepsiburada: paketlenip "Gönderime Hazır" olur; ikisi de sistem kaydına alınır. Google Sheet ve e-posta ayarlıysa onlar da yapılır, ayarlı değilse atlanır. |
 
-Sağ üstteki **Önceki aktarımlar** ile tarih aralığı seçip daha önce aktarılanları görebilir ve
-Excel'ini yeniden indirebilirsiniz (durum değiştirmez).
+Her "Excel'e aktar" numaralı bir aktarımdır (#1, #2…). Sağ üstteki **Önceki aktarımlar** ile gün seçip
+o günün aktarımlarını saatleriyle görebilir, birini açıp Excel'ini yeniden indirebilirsiniz (durum değiştirmez).
 
 Eski sürümlerden kalan etiketler: `drive'a aktarıldı - otomatik` ve `etiketi çıkarıldı - otomatik`
 aktarılmış sayılır; `etiket oluşturuldu - otomatik` olanlar hâlâ bekleyen listesinde görünür.
