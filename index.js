@@ -1510,6 +1510,9 @@ const PAGE = `<!doctype html>
   .warn{color:var(--warn)} .ok{color:var(--ok)}
   a.dl{font-weight:700;color:var(--brand);margin-right:16px}
   .hide{display:none !important}
+  body.gomulu{padding:8px}
+  body.gomulu h1{font-size:0;margin:0 0 6px}
+  body.gomulu h1 small{font-size:11px}
 </style></head>
 <body><div class="wrap">
   <h1>Esse Jeffe Siparişler <small>{{SURUM}}</small></h1>
@@ -1541,6 +1544,7 @@ const PAGE = `<!doctype html>
 </div>
 <script>
 const COLS = 13;
+if (window.self !== window.top) document.body.classList.add('gomulu');   // Dilara panelinin içinde: başlık küçülür
 let mode = 'bekleyen', session = null, orders = [];
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1614,7 +1618,7 @@ async function load(keepMsg) {
   if (!keepMsg) $('msg').innerHTML = '';
   try {
     const q = my === 'aktarilan' ? '&bas=' + $('bas').value + '&bit=' + $('bit').value : '';
-    const d = await call('/api/liste?liste=' + my + q);
+    const d = await call('api/liste?liste=' + my + q);
     if (my !== mode) return;
     session = d.sessionId; orders = d.orders; render();
     $('msg').innerHTML += warnHtml(d.warnings);
@@ -1633,7 +1637,7 @@ $('export').onclick = async () => {
   const btn = $('export');
   btn.disabled = true; btn.textContent = 'Aktarılıyor…';
   try {
-    const d = await post('/api/excel-aktar', { sessionId: session, keys: selected() });
+    const d = await post('api/excel-aktar', { sessionId: session, keys: selected() });
     $('msg').innerHTML = '<span class="ok">' + d.orderCount + " sipariş Excel'e aktarıldı.</span>" + mailText(d.mail) +
       '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>' +
       (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
@@ -1645,7 +1649,7 @@ $('export').onclick = async () => {
 
 $('excel').onclick = async () => {
   try {
-    const d = await post('/api/excel', { sessionId: session, keys: selected() });
+    const d = await post('api/excel', { sessionId: session, keys: selected() });
     window.location.href = d.download;
   } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
 };
@@ -1656,7 +1660,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-18 · v10 (kompakt sayfa, SKU sıralı Excel)';
+const SURUM = '2026-10-22 · v11 (Dilara panelinde sekme)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1685,7 +1689,7 @@ const keep = (buffer, filename) => {
   const id = crypto.randomUUID();
   files.set(id, { buffer, filename });
   setTimeout(() => files.delete(id), 60 * 60 * 1000).unref();
-  return `/indir/${id}`;
+  return `indir/${id}`;   // göreli: Dilara panelinin /siparis/ altında da çalışır
 };
 
 const handle = (fn) => async (req, res) => {

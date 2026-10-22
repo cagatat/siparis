@@ -24,6 +24,9 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
 Bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiştirilmiş kalemler
 (`currentQuantity` = 0) hariç. Etiketler kolonu en sonda (bizim otomatik etiketlerimiz gizli).
 
+- Dilara panelinde "📦 Siparişler" sekmesinde de açılır: Dilara `/siparis/*` isteklerini Basic Auth ile buraya iletir.
+  Bu yüzden sayfadaki adresler GÖRELİ olmalı (`api/liste`, `indir/…`; başında `/` yok).
+
 ## Excel / Sheet çıktısı
 - Kanal adları: Shopify → `website`, Trendyol → `trendyol`, Hepsiburada → `hepsiburada`.
 - Kargo adları: "Marketplace" kelimesi atılır (Trendyol Express); HepsiJET'in tüm yazımları → `HepsiJet`.
