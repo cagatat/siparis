@@ -5,7 +5,10 @@ Panel tek sayfadır, iki buton vardır:
 | Buton | Ne yapar |
 |---|---|
 | **Siparişleri çek** | Henüz Excel'e aktarılmamış siparişleri listeler. Hiçbir şeyi değiştirmez. Sayfa açılınca kendiliğinden de çalışır. |
-| **Excel'e aktar** | Seçilen siparişleri Excel dosyasına yazar ve dosyayı indirir. Shopify: siparişe `excel` etiketi eklenir (tek etiket). Trendyol: "İşleme Alındı" yapılır · Hepsiburada: paketlenip "Gönderime Hazır" olur; ikisi de sistem kaydına alınır. Google Sheet ve e-posta ayarlıysa onlar da yapılır, ayarlı değilse atlanır. |
+| **Excel'e aktar** | Seçilen siparişleri Excel dosyasına yazar ve dosyayı indirir. Shopify: siparişe `excel` etiketi eklenir (tek etiket). Trendyol: "İşleme Alındı" yapılır · Hepsiburada: paketlenip "Gönderime Hazır" olur; ikisi de sistem kaydına alınır. Google Sheet ayarlıysa o da yazılır. E-posta gönderilmez. |
+
+**Sıralama:** "Sırala" kutusundan (SKU, ödeme yöntemi — önce kapıda, tarih, etiket — önce değişim/iade) ya da sütun başlığına tıklayarak
+sıralanır; seçiminiz hatırlanır. Excel ve Google Sheet ekranda gördüğünüz sırayla yazılır.
 
 Her "Excel'e aktar" numaralı bir aktarımdır (#1, #2…). Sağ üstteki **Önceki aktarımlar** ile gün seçip
 o günün aktarımlarını saatleriyle görebilir, birini açıp Excel'ini yeniden indirebilirsiniz (durum değiştirmez).
