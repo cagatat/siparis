@@ -100,7 +100,22 @@ const util = (() => {
     return text ? JSON.parse(text) : {};
   }
 
-  return { pick, toNumber, toDate, httpJson };
+  // Okunur ödeme yöntemi (yalnız ekranda; Excel/Sheet'teki "Ödeme" kolonu değişmez).
+  // Dilara'nın taslaktan girdiği kapıda siparişlerde altyapı "manual", ödeme bekliyor → Kapıda.
+  function odemeYontemi(gateways = [], finansal = '', tags = []) {
+    const g = gateways.join(' ').toLocaleLowerCase('tr');
+    const t = tags.join(' ').toLocaleLowerCase('tr');
+    if (/de[ğg]i[şs]im/.test(t)) return 'Değişim';
+    if (/\biade\b/.test(t)) return 'İade';
+    if (/cash on delivery|\bcod\b|kap[ıi]da|teslimatta/.test(g)) return 'Kapıda';
+    if (/havale|eft|bank|transfer/.test(g) || /[öo]deme bekleniyor|dekont|havale/.test(t)) return finansal === 'PAID' ? 'Havale/EFT (ödendi)' : 'Havale/EFT';
+    if (/paytr|kredi|card|kart|shopify_payments|iyzico/.test(g)) return 'Kart';
+    if (finansal === 'PAID') return 'Ödendi';
+    if (!g || /manual/.test(g)) return ['PENDING', 'PARTIALLY_PAID', 'AUTHORIZED'].includes(finansal) ? 'Kapıda' : (gateways.join(', ') || 'Belirsiz');
+    return gateways.join(', ');
+  }
+
+  return { pick, toNumber, toDate, httpJson, odemeYontemi };
 })();
 
 // ======================================================================
@@ -152,7 +167,7 @@ const shopify = (() => {
 
   const ORDER_FIELDS = `
         id legacyResourceId name createdAt cancelledAt tags
-        displayFulfillmentStatus paymentGatewayNames phone
+        displayFulfillmentStatus displayFinancialStatus paymentGatewayNames phone
         customer { firstName lastName }
         shippingAddress { name firstName lastName company phone address1 address2 city province provinceCode zip countryCodeV2 }
         lineItems(first: 50) {
@@ -237,6 +252,7 @@ const shopify = (() => {
             adet: qty,
             tutar: unit != null ? unit * qty : null,
             odemeTipi: (o.paymentGatewayNames || []).join(', '),
+            odeme: util.odemeYontemi(o.paymentGatewayNames || [], o.displayFinancialStatus, tags),
             durum: o.cancelledAt ? 'İptal' : (DURUM[o.displayFulfillmentStatus] || o.displayFulfillmentStatus),
             etiketler: tags.filter((t) => !HIDDEN.includes(t)).join(', '),
             adresDurum: ak ? ak.durum : '',
@@ -426,7 +442,7 @@ const trendyol = (() => {
             sku: pick(line, 'merchantSku', 'barcode'),
             adet: toNumber(line.quantity),
             tutar: toNumber(pick(line, 'amount', 'price')),
-            odemeTipi: 'Trendyol',
+            odemeTipi: 'Trendyol', odeme: 'Pazaryeri',
             durum: DURUM[status] || status,
             etiketler: '',
           });
@@ -519,7 +535,7 @@ const hepsiburada = (() => {
       sku: pick(line, 'merchantSku', 'sku', 'hepsiburadaSku'),
       adet: toNumber(pick(line, 'quantity')),
       tutar: toNumber(pick(line, 'totalPrice', 'price')),
-      odemeTipi: 'Hepsiburada',
+      odemeTipi: 'Hepsiburada', odeme: 'Pazaryeri',
       etiketler: '',
       ...extra,
     };
@@ -1065,11 +1081,13 @@ const excel = (() => {
   // SKU sıralama: sipariş içindeki SKU'lar alfabetik (sayılar doğal sırada), siparişler de
   // ilk SKU'larına göre sıralanır — aynı ürünler Excel'de alt alta gelir.
   const cmp = new Intl.Collator('tr', { numeric: true, sensitivity: 'base' }).compare;
+  const skuSirala = (o) => ({ ...o, skus: [...o.skus].sort((a, b) => cmp(a.sku, b.sku)) });
   function sortBySku(orders) {
-    return orders
-      .map((o) => ({ ...o, skus: [...o.skus].sort((a, b) => cmp(a.sku, b.sku)) }))
+    return orders.map(skuSirala)
       .sort((a, b) => cmp(a.skus[0]?.sku || '', b.skus[0]?.sku || '') || cmp(a.siparisNo, b.siparisNo));
   }
+  // Paneldeki sıralama: siparişler gönderilen sırada kalır (yalnız sipariş içindeki SKU'lar sıralanır)
+  const ekranSirasi = (orders) => orders.map(skuSirala);
 
   const skuText = (o) => o.skus.map((x) => (x.adet > 1 ? `${x.sku} ×${x.adet}` : x.sku)).join('\n');
   const dateText = (d) => d ? new Date(d).toLocaleString('tr-TR', {
@@ -1132,7 +1150,7 @@ const excel = (() => {
     return wb.xlsx.writeBuffer();
   }
 
-  return { buildWorkbook, COLUMNS, toRecord, sortBySku };
+  return { buildWorkbook, COLUMNS, toRecord, sortBySku, ekranSirasi };
 })();
 
 // ======================================================================
@@ -1253,45 +1271,14 @@ const sheets = (() => {
 })();
 
 // ======================================================================
-// E-POSTA
-// ======================================================================
-const mailer = (() => {
-  // E-posta Resend üzerinden gönderilir (HTTP API; Railway'de SMTP portlarına ihtiyaç duymaz).
-  const cfg = config.mail;
-
-  async function sendMail({ subject, html, attachments = [] }) {
-    if (!cfg.resendKey || !cfg.to) return { skipped: true, reason: 'E-posta ayarları eksik' };
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${cfg.resendKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: cfg.from,
-        to: cfg.to.split(',').map((s) => s.trim()),
-        subject,
-        html,
-        attachments: attachments.map((a) => ({
-          filename: a.filename,
-          content: Buffer.from(a.content).toString('base64'),
-        })),
-      }),
-    });
-    if (!res.ok) throw new Error(`E-posta gönderilemedi: ${res.status} ${await res.text()}`);
-    return { sent: true };
-  }
-
-  return { sendMail };
-})();
-
-// ======================================================================
 // SİPARİŞ AKIŞI (tek sayfa: siparişleri çek → Excel'e aktar)
 // ======================================================================
 const flow = (() => {
   //  Siparişleri çek : henüz Excel'e aktarılmamış siparişleri listeler (hiçbir şeyi değiştirmez)
-  //  Excel'e aktar   : seçilenleri Excel'e (ayarlıysa Google Sheet'e ve e-postaya) yazar;
+  //  Excel'e aktar   : seçilenleri Excel'e (ayarlıysa Google Sheet'e) yazar; e-posta gönderilmez (kullanıcı isteği);
   //                    Shopify → "excel" etiketi; Trendyol/Hepsiburada → işleme alınır + kayıt
   //  Aktarılanlar    : tarih aralığıyla görüntüleme + Excel'i yeniden indirme (durum değiştirmez)
   const { buildWorkbook } = excel;
-  const { sendMail } = mailer;
   const ALL = { shopify: ['Shopify', shopify], trendyol: ['Trendyol', trendyol], hepsiburada: ['Hepsiburada', hepsiburada] };
   const active = () => config.sources.filter((k) => ALL[k]).map((k) => ALL[k]);
   const byName = Object.fromEntries(Object.values(ALL));
@@ -1312,7 +1299,7 @@ const flow = (() => {
         map.set(r._key, {
           key: r._key, kanal: r.kanal, siparisNo: r.siparisNo, tarih: r.tarih, musteri: r.musteri,
           telefon: r.telefon, adres: r.adres || '', kargoFirmasi: r.kargoFirmasi, kargoAnahtari: r.kargoAnahtari,
-          odemeTipi: r.odemeTipi, durum: r.durum, etiketler: r.etiketler || '',
+          odemeTipi: r.odemeTipi, odeme: r.odeme || r.odemeTipi || '', durum: r.durum, etiketler: r.etiketler || '',
           adresDurum: r.adresDurum || '', adresNot: r.adresNot || '', adresDuzeltildi: !!r.adresDuzeltildi,
           tutar: 0, adet: 0, skus: [], rows: [],
         });
@@ -1409,23 +1396,10 @@ const flow = (() => {
     return `${prefix}_${tr.getFullYear()}-${p(tr.getMonth() + 1)}-${p(tr.getDate())}_${p(tr.getHours())}${p(tr.getMinutes())}.xlsx`;
   }
 
-  async function mailList({ title, orders, buffer, filename, sheet, warnings }) {
-    const sheetLine = sheet && sheet.url ? `<p><a href="${sheet.url}">Google Sheet'te aç</a> (sayfa: ${sheet.title})</p>` : '';
-    const warn = warnings.length ? `<p style="color:#b00020"><b>Uyarı:</b><br>${warnings.join('<br>')}</p>` : '';
-    try {
-      return await sendMail({
-        subject: `${title} – ${orders.length} sipariş`,
-        html: `<p>${title}: <b>${orders.length}</b> sipariş. Excel ekte.</p>${sheetLine}${warn}`,
-        attachments: [{ filename, content: buffer }],
-      });
-    } catch (e) {
-      console.error(e);
-      return { error: e.message };
-    }
-  }
 
-  // Excel'e aktar: Excel dosyası her zaman oluşur; Google Sheet ve e-posta ayarlıysa onlar da yapılır.
-  async function exportExcel({ sessionId, keys }) {
+  // Excel'e aktar: Excel dosyası her zaman oluşur; Google Sheet ayarlıysa o da yazılır.
+  // sirali: siparişler paneldeki sırayla (keys sırası) yazılır; değilse eskisi gibi SKU sırasıyla.
+  async function exportExcel({ sessionId, keys, sirali = false }) {
     const { s, selected } = take(sessionId, keys, 'bekleyen');
     const channels = active().map(([n]) => n);
     const warnings = [];
@@ -1459,7 +1433,8 @@ const flow = (() => {
     const etiket = aktarimEtiketi(aktarim);
 
     let sheet = null;
-    const ordered = excel.sortBySku(exported);
+    const sira = new Map((keys || []).map((k, i) => [k, i]));
+    const ordered = sirali ? excel.ekranSirasi([...exported].sort((a, b) => sira.get(a.key) - sira.get(b.key))) : excel.sortBySku(exported);
     if (sheets.configured()) {
       try { sheet = await sheets.writeOrders(ordered, etiket); }
       catch (e) { console.error(e); warnings.push(`Google Sheet'e yazılamadı: ${e.message}`); }
@@ -1467,14 +1442,13 @@ const flow = (() => {
 
     const buffer = await buildWorkbook(ordered, warnings, channels);
     const filename = fileName(`aktarim-${aktarim.no}`);
-    const mail = await mailList({ title: `Aktarım ${etiket}`, orders: ordered, buffer, filename, sheet, warnings });
-    return { orderCount: exported.length, aktarim: { no: aktarim.no, zaman: aktarim.zaman, etiket }, buffer, filename, sheet, mail, warnings };
+    return { orderCount: exported.length, aktarim: { no: aktarim.no, zaman: aktarim.zaman, etiket }, buffer, filename, sheet, warnings };
   }
 
   // Aktarılanlar listesinden seçilenleri yeniden Excel olarak almak (durum değiştirmez)
-  async function download({ sessionId, keys }) {
+  async function download({ sessionId, keys, sirali = false }) {
     const { s, selected } = take(sessionId, keys);
-    const buffer = await buildWorkbook(excel.sortBySku(selected), [], active().map(([n]) => n));
+    const buffer = await buildWorkbook(sirali ? excel.ekranSirasi(selected) : excel.sortBySku(selected), [], active().map(([n]) => n));
     return { orderCount: selected.length, buffer, filename: fileName(s.aktarim ? `aktarim-${s.aktarim.no}` : 'liste') };
   }
 
@@ -1557,7 +1531,7 @@ const PAGE = `<!doctype html>
   input[type=date]{padding:6px 8px;border:1px solid var(--line);border-radius:6px;font:inherit}
   .count{color:var(--muted)}
   .scroll{overflow:auto;max-height:calc(100vh - 150px);border:1px solid var(--line);border-radius:8px}
-  table{border-collapse:collapse;width:100%;min-width:1150px}
+  table{border-collapse:collapse;width:100%;min-width:980px}
   th,td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
   th{background:#f3ece7;font-size:13px;font-weight:700;position:sticky;top:0;z-index:1;white-space:nowrap;color:var(--muted)}
   th:first-child,td:first-child{width:32px;padding-right:0}
@@ -1566,13 +1540,20 @@ const PAGE = `<!doctype html>
   tr.off td{opacity:.4}
   td.num{text-align:right;white-space:nowrap}
   td.nowrap{white-space:nowrap}
-  td.addr{min-width:220px;max-width:320px}
+  td.addr{min-width:200px;max-width:280px}
+  th.sr{cursor:pointer;user-select:none}
+  th.sr:hover{color:var(--ink)}
+  th.sr .ok-i{font-size:11px;margin-left:3px;color:var(--brand)}
+  select{padding:7px 8px;border:1px solid var(--line);border-radius:8px;font:inherit;background:#fff}
+  .tag{display:block;white-space:nowrap}
+  .odeme{white-space:nowrap;font-weight:600}
+  table.tek-kanal th:nth-child(2),table.tek-kanal td:nth-child(2){display:none}
   td.addr.bad{background:#fde8e8 !important;color:#8a1020;box-shadow:inset 3px 0 0 #c62828}
   .anote{display:block;margin-top:2px;font-size:12.5px;font-weight:600}
   .afix{display:block;margin-top:2px;font-size:12.5px;color:var(--ok)}
   .sku{display:block;font-family:ui-monospace,"Cascadia Mono",Consolas,Menlo,monospace;font-size:13.5px;font-weight:500;white-space:nowrap}
   .mono{font-family:ui-monospace,"Cascadia Mono",Consolas,Menlo,monospace;font-size:13px;color:var(--muted)}
-  .tags{color:var(--muted);min-width:140px;font-size:13.5px}
+  .tags{color:var(--muted);font-size:13px}
   input[type=checkbox]{width:16px;height:16px;margin:2px 0 0}
   .empty{padding:28px;text-align:center;color:var(--muted)}
   #msg{margin-bottom:8px;line-height:1.6}
@@ -1596,6 +1577,15 @@ const PAGE = `<!doctype html>
       <button id="export" disabled>Excel'e aktar</button>
       <span class="count" id="count"></span>
       <span style="flex:1"></span>
+      <label class="muted" for="sirala">Sırala</label>
+      <select id="sirala" aria-label="Sıralama">
+        <option value="sku">SKU'ya göre</option>
+        <option value="odeme">Ödeme yöntemine göre (önce kapıda)</option>
+        <option value="tarih-yeni">Tarihe göre (yeni → eski)</option>
+        <option value="tarih-eski">Tarihe göre (eski → yeni)</option>
+        <option value="etiket">Etikete göre (değişim/iade önce)</option>
+        <option value="ozel" hidden>Sütuna göre</option>
+      </select>
       <button class="link" id="toPast">Önceki aktarımlar</button>
     </div>
     <div class="bar hide" id="barPast">
@@ -1607,10 +1597,10 @@ const PAGE = `<!doctype html>
       <button class="link" id="toMain">← Bekleyen siparişler</button>
     </div>
     <div id="msg"></div>
-    <div class="scroll"><table>
+    <div class="scroll"><table id="tablo">
       <thead><tr>
-        <th><input type="checkbox" id="all"></th><th>Kanal</th><th>Sipariş</th><th>Tarih</th><th>Müşteri</th><th>Telefon</th>
-        <th>Adres</th><th>SKU</th><th>Tutar</th><th>Ödeme</th><th>Kargo anahtarı</th><th>Durum</th><th>Etiketler</th>
+        <th><input type="checkbox" id="all"></th><th class="sr" data-k="kanal">Kanal</th><th class="sr" data-k="siparisNo">Sipariş</th><th class="sr" data-k="tarih">Tarih</th><th class="sr" data-k="musteri">Müşteri</th><th>Telefon</th>
+        <th>Adres</th><th class="sr" data-k="sku">SKU</th><th class="sr" data-k="tutar">Tutar</th><th class="sr" data-k="odeme">Ödeme</th><th>Kargo anahtarı</th><th class="sr" data-k="durum">Durum</th><th class="sr" data-k="etiket">Etiketler</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table></div>
@@ -1628,6 +1618,40 @@ const bugun = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/I
 const saat = (d) => new Date(d).toLocaleTimeString('tr-TR', { timeZone: 'Europe/Istanbul', hour: '2-digit', minute: '2-digit' });
 const empty = (t) => '<tr><td colspan="' + COLS + '" class="empty">' + t + '</td></tr>';
 let aktarimNo = null;
+
+// ---- Sıralama (seçim hatırlanır; Excel ve Google Sheet de ekrandaki sırayla yazılır) ----
+const HAZIR = { sku: { k: 'sku', yon: 1 }, odeme: { k: 'odeme', yon: 1 }, 'tarih-yeni': { k: 'tarih', yon: -1 }, 'tarih-eski': { k: 'tarih', yon: 1 }, etiket: { k: 'etiket', yon: 1 } };
+const ODEME_SIRA = ['Kapıda', 'Havale/EFT', 'Havale/EFT (ödendi)', 'Kart', 'Ödendi', 'Değişim', 'İade', 'Pazaryeri'];
+const coll = new Intl.Collator('tr', { numeric: true, sensitivity: 'base' });
+const ilkSku = (o) => (o.skus || []).map((x) => x.sku).sort(coll.compare)[0] || '';
+let sira = (() => { try { return JSON.parse(localStorage.getItem('siralama')) || { ad: 'sku', ...HAZIR.sku }; } catch { return { ad: 'sku', ...HAZIR.sku }; } })();
+function siraKaydet() { try { localStorage.setItem('siralama', JSON.stringify(sira)); } catch {} }
+function anahtar(o, k) {
+  if (k === 'sku') return ilkSku(o);
+  if (k === 'tarih') return new Date(o.tarih || 0).getTime();
+  if (k === 'tutar') return Number(o.tutar) || 0;
+  if (k === 'odeme') { const i = ODEME_SIRA.indexOf(o.odeme); return i < 0 ? 99 : i; }
+  if (k === 'etiket') { const t = (o.etiketler || '').toLocaleLowerCase('tr'); return (/değişim|degisim/.test(t) ? '0' : /iade/.test(t) ? '1' : t ? '2' : '3') + t; }
+  return String(o[k] ?? '');
+}
+function sirala(liste) {
+  const { k, yon } = sira;
+  const fark = (a, b) => { const x = anahtar(a, k), y = anahtar(b, k); return typeof x === 'number' ? x - y : coll.compare(x, y); };
+  return [...liste].sort((a, b) => yon * fark(a, b) || coll.compare(ilkSku(a), ilkSku(b)) || coll.compare(a.siparisNo, b.siparisNo));
+}
+function siraGoster() {
+  $('sirala').value = HAZIR[sira.ad] ? sira.ad : 'ozel';
+  document.querySelectorAll('th.sr').forEach((th) => {
+    th.querySelector('.ok-i')?.remove();
+    if (th.dataset.k === sira.k) th.insertAdjacentHTML('beforeend', '<span class="ok-i">' + (sira.yon > 0 ? '▲' : '▼') + '</span>');
+  });
+}
+$('sirala').onchange = (e) => { if (HAZIR[e.target.value]) { sira = { ad: e.target.value, ...HAZIR[e.target.value] }; siraKaydet(); render(); } };
+document.querySelectorAll('th.sr').forEach((th) => th.onclick = () => {
+  const k = th.dataset.k;
+  sira = sira.k === k ? { ad: 'ozel', k, yon: -sira.yon } : { ad: 'ozel', k, yon: k === 'tarih' || k === 'tutar' ? -1 : 1 };
+  siraKaydet(); render();
+});
 
 function setMode(m) {
   mode = m; session = null; orders = [];
@@ -1668,7 +1692,7 @@ async function aktarimiAc(no) {
   try {
     const d = await call('api/liste?liste=aktarim&no=' + no);
     if (mode !== 'aktarim' || aktarimNo !== no) return;
-    session = d.sessionId; orders = d.orders; render();
+    session = d.sessionId; orders = d.orders; $('rows').innerHTML = ''; render();
     $('msg').innerHTML = '<b>Aktarım ' + esc(d.aktarim.etiket) + '</b> · ' + orders.length + ' sipariş' + warnHtml(d.warnings);
   } catch (e) { $('rows').innerHTML = empty(''); $('msg').innerHTML = warnHtml([e.message]); }
 }
@@ -1694,17 +1718,22 @@ function addrCell(o) {
 }
 
 function render() {
+  siraGoster();
+  $('tablo').classList.toggle('tek-kanal', new Set(orders.map((o) => o.kanal)).size <= 1);
   if (!orders.length) {
     $('rows').innerHTML = empty(mode === 'bekleyen' ? "Excel'e aktarılmamış sipariş yok." : 'Bu aktarımdaki siparişler bulunamadı.');
     return update();
   }
-  $('rows').innerHTML = orders.map((o) =>
-    '<tr><td><input type="checkbox" class="pick" value="' + esc(o.key) + '" checked></td>' +
+  // Seçimler korunur (yeniden sıralamada işaretler kaybolmaz)
+  const secili = new Set(document.querySelectorAll('.pick').length ? selected() : orders.map((o) => o.key));
+  $('rows').innerHTML = sirala(orders).map((o) =>
+    '<tr><td><input type="checkbox" class="pick" value="' + esc(o.key) + '"' + (secili.has(o.key) ? ' checked' : '') + '></td>' +
     '<td>' + esc(o.kanal) + '</td><td class="nowrap"><b>' + esc(o.siparisNo) + '</b></td><td class="nowrap">' + when(o.tarih) + '</td>' +
     '<td>' + esc(o.musteri) + '</td><td class="nowrap">' + esc(o.telefon) + '</td>' + addrCell(o) +
     '<td>' + o.skus.map((x) => '<span class="sku">' + esc(x.sku) + (x.adet > 1 ? ' ×' + esc(x.adet) : '') + '</span>').join('') + '</td>' +
-    '<td class="num">' + money(o.tutar) + '</td><td>' + esc(o.odemeTipi) + '</td>' +
-    '<td class="mono">' + esc(o.kargoAnahtari) + '</td><td>' + esc(o.durum) + '</td><td class="tags">' + esc(o.etiketler) + '</td></tr>'
+    '<td class="num">' + money(o.tutar) + '</td><td class="odeme" title="' + esc(o.odemeTipi) + '">' + esc(o.odeme || o.odemeTipi) + '</td>' +
+    '<td class="mono">' + esc(o.kargoAnahtari) + '</td><td>' + esc(o.durum) + '</td><td class="tags">' +
+    String(o.etiketler || '').split(',').map((t) => t.trim()).filter(Boolean).map((t) => '<span class="tag">' + esc(t) + '</span>').join('') + '</td></tr>'
   ).join('');
   document.querySelectorAll('.pick').forEach((c) => c.onchange = update);
   update();
@@ -1727,24 +1756,19 @@ async function load(keepMsg) {
   try {
     const d = await call('api/liste?liste=bekleyen');
     if (my !== mode) return;
-    session = d.sessionId; orders = d.orders; render();
+    session = d.sessionId; orders = d.orders; $('rows').innerHTML = ''; render();
     $('msg').innerHTML += warnHtml(d.warnings);
   } catch (e) { if (my === mode) { $('rows').innerHTML = empty(''); $('msg').innerHTML += warnHtml([e.message]); } }
   finally { btn.disabled = false; btn.textContent = 'Siparişleri çek'; }
 }
 $('fetch').onclick = () => load();
 
-function mailText(m) {
-  if (!m) return '';
-  return m.sent ? ' E-postanıza gönderildi.' : m.error ? ' <span class="warn">E-posta gönderilemedi: ' + esc(m.error) + '</span>' : '';
-}
-
 $('export').onclick = async () => {
   const btn = $('export');
   btn.disabled = true; btn.textContent = 'Aktarılıyor…';
   try {
-    const d = await post('api/excel-aktar', { sessionId: session, keys: selected() });
-    $('msg').innerHTML = '<span class="ok"><b>Aktarım ' + esc(d.aktarim.etiket) + '</b>: ' + d.orderCount + " sipariş Excel'e aktarıldı.</span>" + mailText(d.mail) +
+    const d = await post('api/excel-aktar', { sessionId: session, keys: selected(), sirali: true });
+    $('msg').innerHTML = '<span class="ok"><b>Aktarım ' + esc(d.aktarim.etiket) + '</b>: ' + d.orderCount + " sipariş Excel'e aktarıldı.</span>" +
       '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>' +
       (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
       warnHtml(d.warnings);
@@ -1755,7 +1779,7 @@ $('export').onclick = async () => {
 
 $('excel').onclick = async () => {
   try {
-    const d = await post('api/excel', { sessionId: session, keys: selected() });
+    const d = await post('api/excel', { sessionId: session, keys: selected(), sirali: true });
     window.location.href = d.download;
   } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
 };
@@ -1766,7 +1790,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-22 · v12 (numaralı aktarımlar)';
+const SURUM = '2026-10-28 · v13 (sıralama, geniş tablo, e-posta yok)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1833,17 +1857,17 @@ app.get('/api/aktarimlar', handle(async (req) => {
 }));
 
 app.post('/api/excel-aktar', handle(exclusive(async (req) => {
-  const { sessionId, keys } = req.body || {};
-  const out = await flow.exportExcel({ sessionId, keys });
+  const { sessionId, keys, sirali } = req.body || {};
+  const out = await flow.exportExcel({ sessionId, keys, sirali: sirali === true });
   return {
-    orderCount: out.orderCount, aktarim: out.aktarim, warnings: out.warnings, mail: out.mail,
+    orderCount: out.orderCount, aktarim: out.aktarim, warnings: out.warnings,
     sheetUrl: out.sheet && out.sheet.url, download: keep(out.buffer, out.filename),
   };
 })));
 
 app.post('/api/excel', handle(async (req) => {
-  const { sessionId, keys } = req.body || {};
-  const out = await flow.download({ sessionId, keys });
+  const { sessionId, keys, sirali } = req.body || {};
+  const out = await flow.download({ sessionId, keys, sirali: sirali === true });
   return { orderCount: out.orderCount, download: keep(out.buffer, out.filename) };
 }));
 

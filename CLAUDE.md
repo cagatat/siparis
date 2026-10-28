@@ -15,8 +15,16 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
 - **Siparişleri çek**: Excel'e aktarılmamış siparişleri listeler, hiçbir şeyi değiştirmez.
 - **Excel'e aktar**: seçilenler Excel'e yazılır ve indirilir. Shopify → tek etiket `excel`
   (`SHOPIFY_ETIKET_EXCEL`); Trendyol → `Picking`; Hepsiburada → paketle; ikisi de `DATA_DIR/aktarilanlar.json`.
-  Google Sheet ("Siparişler" sayfası, başlık hariç temizlenip yazılır) ve e-posta ayarlıysa yapılır, yoksa atlanır.
+  Google Sheet ("Siparişler" sayfası, başlık hariç temizlenip yazılır) ayarlıysa yazılır, yoksa atlanır.
+  **E-posta gönderilmez** (v13, kullanıcı isteği; Resend modülü kaldırıldı — `MAIL_TO` yalnız adres kontrolü e-postası için okunur).
   Butonlar onay sormaz (kullanıcı isteği).
+- **Sıralama (v13)**: üstte "Sırala" seçimi (SKU · ödeme yöntemi, önce kapıda · tarih yeni/eski · etiket, değişim/iade önce) ve
+  tıklanabilir sütun başlıkları; seçim tarayıcıda hatırlanır (`localStorage.siralama`), varsayılan SKU. Excel ve Google Sheet
+  **ekrandaki sırayla** yazılır (istemci `keys`'i ekran sırasıyla ve `sirali: true` gönderir; gelmezse eskisi gibi `sortBySku`).
+- **Ödeme kolonu (ekran)**: `util.odemeYontemi` okunur ad gösterir (Kapıda / Havale/EFT / Kart / Ödendi / Değişim / İade / Pazaryeri;
+  Dilara'nın taslak kapıda siparişleri `manual` + ödeme bekliyor → Kapıda; `displayFinancialStatus` okunur). Ham altyapı adı
+  fare üstünde görünür. **Excel/Sheet'teki "Ödeme" kolonu değişmedi** (ham ad; etiket programı Sheet'ten okuyor).
+- Geniş tablo (v13): etiketler alt alta tam görünür, tek kanal açıksa Kanal kolonu gizlenir, tablo en az 980px.
 - Her "Excel'e aktar" numaralı bir **aktarımdır** (#1, #2…; no + zaman + sipariş kimlikleri). Liste Shopify'da
   uygulamanın gizli alanında (AppInstallation metafield `esse_siparis.aktarimlar`, json; Shopify kapalıysa
   `DATA_DIR/aktarimlar.json`). Liste okunamazsa aktarım hiç başlamaz. Excel adı `aktarim-N_…`, Sheet'te "Aktarım" = `#N · tarih saat`.
