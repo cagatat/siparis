@@ -24,7 +24,14 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
 - **Ödeme kolonu (ekran)**: `util.odemeYontemi` okunur ad gösterir (Kapıda / Havale/EFT / Kart / Ödendi / Değişim / İade / Pazaryeri;
   Dilara'nın taslak kapıda siparişleri `manual` + ödeme bekliyor → Kapıda; `displayFinancialStatus` okunur). Ham altyapı adı
   fare üstünde görünür. **Excel/Sheet'teki "Ödeme" kolonu değişmedi** (ham ad; etiket programı Sheet'ten okuyor).
-- Geniş tablo (v13): etiketler alt alta tam görünür, tek kanal açıksa Kanal kolonu gizlenir, tablo en az 980px.
+- Geniş tablo (v13): etiketler alt alta tam görünür, tablo en az 980px.
+- **Sipariş kanalı (v14, ekran)**: `util.siparisKanali` — Dilara'nın etiketlerinden WhatsApp / Instagram / Messenger / Telegram
+  (yalnız "dilara" → Dilara), değilse Shopify `sourceName`: web → Web sitesi, shopify_draft_order → Elle girilen; Trendyol/Hepsiburada.
+  Kanal kolonu her zaman görünür; **varsayılan sıralama kanala göre** (WhatsApp → Instagram → Messenger → Telegram → Dilara → Web sitesi
+  → Elle girilen → pazaryerleri, sonra SKU). Hatırlanan seçim anahtarı `siralama2` (v13'teki bir kez sıfırlandı).
+  **Excel/Sheet'teki "Kanal" kolonu değişmedi** (website/trendyol/hepsiburada; etiket programı KANAL değişkenini etikete basıyor).
+- Etiketler İngilizce kelimelerse (Instagram, WhatsApp, Cash on Delivery) `toLowerCase()` kullan; `toLocaleLowerCase('tr')`
+  "I"yı "ı" yapar ve eşleşme kaçar. Türkçe etiketler (İade, Ödeme bekleniyor) için `tr` doğru.
 - Her "Excel'e aktar" numaralı bir **aktarımdır** (#1, #2…; no + zaman + sipariş kimlikleri). Liste Shopify'da
   uygulamanın gizli alanında (AppInstallation metafield `esse_siparis.aktarimlar`, json; Shopify kapalıysa
   `DATA_DIR/aktarimlar.json`). Liste okunamazsa aktarım hiç başlamaz. Excel adı `aktarim-N_…`, Sheet'te "Aktarım" = `#N · tarih saat`.

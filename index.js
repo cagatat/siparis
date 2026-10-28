@@ -103,8 +103,8 @@ const util = (() => {
   // Okunur ödeme yöntemi (yalnız ekranda; Excel/Sheet'teki "Ödeme" kolonu değişmez).
   // Dilara'nın taslaktan girdiği kapıda siparişlerde altyapı "manual", ödeme bekliyor → Kapıda.
   function odemeYontemi(gateways = [], finansal = '', tags = []) {
-    const g = gateways.join(' ').toLocaleLowerCase('tr');
-    const t = tags.join(' ').toLocaleLowerCase('tr');
+    const g = gateways.join(' ').toLowerCase();               // altyapı adları İngilizce ("CASH ON DELIVERY")
+    const t = tags.join(' ').toLocaleLowerCase('tr');         // etiketler Türkçe ("İade", "Ödeme bekleniyor")
     if (/de[ğg]i[şs]im/.test(t)) return 'Değişim';
     if (/\biade\b/.test(t)) return 'İade';
     if (/cash on delivery|\bcod\b|kap[ıi]da|teslimatta/.test(g)) return 'Kapıda';
@@ -115,7 +115,22 @@ const util = (() => {
     return gateways.join(', ');
   }
 
-  return { pick, toNumber, toDate, httpJson, odemeYontemi };
+  // Siparişin geldiği yer (yalnız ekranda; Excel/Sheet'teki "Kanal" kolonu değişmez — etiket programı oradan basıyor).
+  // Dilara'nın siparişleri "Dilara" + kanal etiketi taşır (WhatsApp/Instagram/Messenger/Telegram).
+  function siparisKanali(tags = [], kaynak = '') {
+    // Etiketler İngilizce kelimeler: Türkçe küçültme "Instagram"ı "ınstagram" yapardı, standart küçültme kullanılır
+    const t = tags.join(' ').toLowerCase(), k = String(kaynak || '').toLowerCase();
+    if (/whatsapp/.test(t)) return 'WhatsApp';
+    if (/instagram/.test(t)) return 'Instagram';
+    if (/messenger|facebook/.test(t)) return 'Messenger';
+    if (/telegram/.test(t)) return 'Telegram';
+    if (/\bdilara\b/.test(t)) return 'Dilara';
+    if (k === 'web' || k === 'shopify' || k === 'checkout' || !k) return 'Web sitesi';
+    if (k === 'shopify_draft_order') return 'Elle girilen';
+    return kaynak;
+  }
+
+  return { pick, toNumber, toDate, httpJson, odemeYontemi, siparisKanali };
 })();
 
 // ======================================================================
@@ -167,7 +182,7 @@ const shopify = (() => {
 
   const ORDER_FIELDS = `
         id legacyResourceId name createdAt cancelledAt tags
-        displayFulfillmentStatus displayFinancialStatus paymentGatewayNames phone
+        displayFulfillmentStatus displayFinancialStatus paymentGatewayNames phone sourceName
         customer { firstName lastName }
         shippingAddress { name firstName lastName company phone address1 address2 city province provinceCode zip countryCodeV2 }
         lineItems(first: 50) {
@@ -253,6 +268,7 @@ const shopify = (() => {
             tutar: unit != null ? unit * qty : null,
             odemeTipi: (o.paymentGatewayNames || []).join(', '),
             odeme: util.odemeYontemi(o.paymentGatewayNames || [], o.displayFinancialStatus, tags),
+            kaynak: util.siparisKanali(tags, o.sourceName),
             durum: o.cancelledAt ? 'İptal' : (DURUM[o.displayFulfillmentStatus] || o.displayFulfillmentStatus),
             etiketler: tags.filter((t) => !HIDDEN.includes(t)).join(', '),
             adresDurum: ak ? ak.durum : '',
@@ -442,7 +458,7 @@ const trendyol = (() => {
             sku: pick(line, 'merchantSku', 'barcode'),
             adet: toNumber(line.quantity),
             tutar: toNumber(pick(line, 'amount', 'price')),
-            odemeTipi: 'Trendyol', odeme: 'Pazaryeri',
+            odemeTipi: 'Trendyol', odeme: 'Pazaryeri', kaynak: 'Trendyol',
             durum: DURUM[status] || status,
             etiketler: '',
           });
@@ -535,7 +551,7 @@ const hepsiburada = (() => {
       sku: pick(line, 'merchantSku', 'sku', 'hepsiburadaSku'),
       adet: toNumber(pick(line, 'quantity')),
       tutar: toNumber(pick(line, 'totalPrice', 'price')),
-      odemeTipi: 'Hepsiburada', odeme: 'Pazaryeri',
+      odemeTipi: 'Hepsiburada', odeme: 'Pazaryeri', kaynak: 'Hepsiburada',
       etiketler: '',
       ...extra,
     };
@@ -1299,7 +1315,7 @@ const flow = (() => {
         map.set(r._key, {
           key: r._key, kanal: r.kanal, siparisNo: r.siparisNo, tarih: r.tarih, musteri: r.musteri,
           telefon: r.telefon, adres: r.adres || '', kargoFirmasi: r.kargoFirmasi, kargoAnahtari: r.kargoAnahtari,
-          odemeTipi: r.odemeTipi, odeme: r.odeme || r.odemeTipi || '', durum: r.durum, etiketler: r.etiketler || '',
+          odemeTipi: r.odemeTipi, odeme: r.odeme || r.odemeTipi || '', kaynak: r.kaynak || r.kanal, durum: r.durum, etiketler: r.etiketler || '',
           adresDurum: r.adresDurum || '', adresNot: r.adresNot || '', adresDuzeltildi: !!r.adresDuzeltildi,
           tutar: 0, adet: 0, skus: [], rows: [],
         });
@@ -1547,7 +1563,6 @@ const PAGE = `<!doctype html>
   select{padding:7px 8px;border:1px solid var(--line);border-radius:8px;font:inherit;background:#fff}
   .tag{display:block;white-space:nowrap}
   .odeme{white-space:nowrap;font-weight:600}
-  table.tek-kanal th:nth-child(2),table.tek-kanal td:nth-child(2){display:none}
   td.addr.bad{background:#fde8e8 !important;color:#8a1020;box-shadow:inset 3px 0 0 #c62828}
   .anote{display:block;margin-top:2px;font-size:12.5px;font-weight:600}
   .afix{display:block;margin-top:2px;font-size:12.5px;color:var(--ok)}
@@ -1579,6 +1594,7 @@ const PAGE = `<!doctype html>
       <span style="flex:1"></span>
       <label class="muted" for="sirala">Sırala</label>
       <select id="sirala" aria-label="Sıralama">
+        <option value="kanal">Kanala göre</option>
         <option value="sku">SKU'ya göre</option>
         <option value="odeme">Ödeme yöntemine göre (önce kapıda)</option>
         <option value="tarih-yeni">Tarihe göre (yeni → eski)</option>
@@ -1599,7 +1615,7 @@ const PAGE = `<!doctype html>
     <div id="msg"></div>
     <div class="scroll"><table id="tablo">
       <thead><tr>
-        <th><input type="checkbox" id="all"></th><th class="sr" data-k="kanal">Kanal</th><th class="sr" data-k="siparisNo">Sipariş</th><th class="sr" data-k="tarih">Tarih</th><th class="sr" data-k="musteri">Müşteri</th><th>Telefon</th>
+        <th><input type="checkbox" id="all"></th><th class="sr" data-k="kaynak">Kanal</th><th class="sr" data-k="siparisNo">Sipariş</th><th class="sr" data-k="tarih">Tarih</th><th class="sr" data-k="musteri">Müşteri</th><th>Telefon</th>
         <th>Adres</th><th class="sr" data-k="sku">SKU</th><th class="sr" data-k="tutar">Tutar</th><th class="sr" data-k="odeme">Ödeme</th><th>Kargo anahtarı</th><th class="sr" data-k="durum">Durum</th><th class="sr" data-k="etiket">Etiketler</th>
       </tr></thead>
       <tbody id="rows"></tbody>
@@ -1620,17 +1636,20 @@ const empty = (t) => '<tr><td colspan="' + COLS + '" class="empty">' + t + '</td
 let aktarimNo = null;
 
 // ---- Sıralama (seçim hatırlanır; Excel ve Google Sheet de ekrandaki sırayla yazılır) ----
-const HAZIR = { sku: { k: 'sku', yon: 1 }, odeme: { k: 'odeme', yon: 1 }, 'tarih-yeni': { k: 'tarih', yon: -1 }, 'tarih-eski': { k: 'tarih', yon: 1 }, etiket: { k: 'etiket', yon: 1 } };
+const HAZIR = { kanal: { k: 'kaynak', yon: 1 }, sku: { k: 'sku', yon: 1 }, odeme: { k: 'odeme', yon: 1 }, 'tarih-yeni': { k: 'tarih', yon: -1 }, 'tarih-eski': { k: 'tarih', yon: 1 }, etiket: { k: 'etiket', yon: 1 } };
+const KANAL_SIRA = ['WhatsApp', 'Instagram', 'Messenger', 'Telegram', 'Dilara', 'Web sitesi', 'Elle girilen', 'Trendyol', 'Hepsiburada'];
 const ODEME_SIRA = ['Kapıda', 'Havale/EFT', 'Havale/EFT (ödendi)', 'Kart', 'Ödendi', 'Değişim', 'İade', 'Pazaryeri'];
 const coll = new Intl.Collator('tr', { numeric: true, sensitivity: 'base' });
 const ilkSku = (o) => (o.skus || []).map((x) => x.sku).sort(coll.compare)[0] || '';
-let sira = (() => { try { return JSON.parse(localStorage.getItem('siralama')) || { ad: 'sku', ...HAZIR.sku }; } catch { return { ad: 'sku', ...HAZIR.sku }; } })();
-function siraKaydet() { try { localStorage.setItem('siralama', JSON.stringify(sira)); } catch {} }
+// v14: varsayılan kanala göre; anahtar değişti, v13'te hatırlanan seçim bir kez sıfırlanır
+let sira = (() => { try { return JSON.parse(localStorage.getItem('siralama2')) || { ad: 'kanal', ...HAZIR.kanal }; } catch { return { ad: 'kanal', ...HAZIR.kanal }; } })();
+function siraKaydet() { try { localStorage.setItem('siralama2', JSON.stringify(sira)); } catch {} }
 function anahtar(o, k) {
   if (k === 'sku') return ilkSku(o);
   if (k === 'tarih') return new Date(o.tarih || 0).getTime();
   if (k === 'tutar') return Number(o.tutar) || 0;
   if (k === 'odeme') { const i = ODEME_SIRA.indexOf(o.odeme); return i < 0 ? 99 : i; }
+  if (k === 'kaynak') { const i = KANAL_SIRA.indexOf(o.kaynak); return i < 0 ? 99 : i; }
   if (k === 'etiket') { const t = (o.etiketler || '').toLocaleLowerCase('tr'); return (/değişim|degisim/.test(t) ? '0' : /iade/.test(t) ? '1' : t ? '2' : '3') + t; }
   return String(o[k] ?? '');
 }
@@ -1719,7 +1738,6 @@ function addrCell(o) {
 
 function render() {
   siraGoster();
-  $('tablo').classList.toggle('tek-kanal', new Set(orders.map((o) => o.kanal)).size <= 1);
   if (!orders.length) {
     $('rows').innerHTML = empty(mode === 'bekleyen' ? "Excel'e aktarılmamış sipariş yok." : 'Bu aktarımdaki siparişler bulunamadı.');
     return update();
@@ -1728,7 +1746,7 @@ function render() {
   const secili = new Set(document.querySelectorAll('.pick').length ? selected() : orders.map((o) => o.key));
   $('rows').innerHTML = sirala(orders).map((o) =>
     '<tr><td><input type="checkbox" class="pick" value="' + esc(o.key) + '"' + (secili.has(o.key) ? ' checked' : '') + '></td>' +
-    '<td>' + esc(o.kanal) + '</td><td class="nowrap"><b>' + esc(o.siparisNo) + '</b></td><td class="nowrap">' + when(o.tarih) + '</td>' +
+    '<td class="nowrap" title="' + esc(o.kanal) + '">' + esc(o.kaynak || o.kanal) + '</td><td class="nowrap"><b>' + esc(o.siparisNo) + '</b></td><td class="nowrap">' + when(o.tarih) + '</td>' +
     '<td>' + esc(o.musteri) + '</td><td class="nowrap">' + esc(o.telefon) + '</td>' + addrCell(o) +
     '<td>' + o.skus.map((x) => '<span class="sku">' + esc(x.sku) + (x.adet > 1 ? ' ×' + esc(x.adet) : '') + '</span>').join('') + '</td>' +
     '<td class="num">' + money(o.tutar) + '</td><td class="odeme" title="' + esc(o.odemeTipi) + '">' + esc(o.odeme || o.odemeTipi) + '</td>' +
@@ -1790,7 +1808,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-28 · v13 (sıralama, geniş tablo, e-posta yok)';
+const SURUM = '2026-10-29 · v14 (sipariş kanalı, kanala göre sıralama)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
