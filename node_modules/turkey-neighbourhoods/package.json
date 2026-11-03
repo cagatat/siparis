@@ -1,0 +1,78 @@
+{
+  "name": "turkey-neighbourhoods",
+  "version": "4.0.3",
+  "description": "Always up to date names of cities, districts and neighbourhoods of Turkey + city distances. / Her zaman güncel, Türkiye şehir, posta kodu, plaka kodu, ilçe ve mahalle listesi + şehirlerarası mesafeler.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "require": {
+      "types": "./dist/index.d.cts",
+      "default": "./dist/index.cjs"
+    },
+    "import": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "setup": "node --loader @swc-node/register/esm ./src/setup/index.ts",
+    "build": "pkgroll --target=node16.20 --target=es2020 --sourcemap",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest"
+  },
+  "config": {
+    "neighbourhoods_endpoint": "https://postakodu.ptt.gov.tr/Dosyalar/pk_list.zip",
+    "distances_endpoint": "https://www.kgm.gov.tr/SiteCollectionDocuments/KGMdocuments/Root/Uzakliklar/ilmesafe.xlsx"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muratgozel/turkey-neighbourhoods.git"
+  },
+  "keywords": [
+    "turkey",
+    "turkey-post-codes",
+    "turkey-cities",
+    "turkey-districts",
+    "turkey-neighbourhoods",
+    "turkiye-il-ilce-listesi",
+    "turkiye-mahalle-listesi"
+  ],
+  "author": {
+    "name": "Murat Gözel",
+    "email": "murat@gozel.com.tr",
+    "url": "https://gozel.com.tr"
+  },
+  "funding": {
+    "type": "patreon",
+    "url": "https://patreon.com/muratgozel"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/muratgozel/turkey-neighbourhoods/issues"
+  },
+  "homepage": "https://github.com/muratgozel/turkey-neighbourhoods#readme",
+  "devDependencies": {
+    "@jest/globals": "^29.7.0",
+    "@swc-node/register": "^1.8.0",
+    "@swc/core": "^1.4.8",
+    "@swc/jest": "^0.2.36",
+    "@tsconfig/node20": "^20.1.2",
+    "@tsconfig/strictest": "^2.0.3",
+    "@types/node": "^20.10.6",
+    "@types/speakingurl": "^13.0.3",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "node-releaser": "^2.1.4",
+    "node-stream-zip": "^1.13.3",
+    "pino": "^8.19.0",
+    "pino-pretty": "^11.0.0",
+    "pkgroll": "^2.0.2",
+    "pretty-bytes": "^6.1.1",
+    "speakingurl": "^14.0.1",
+    "typescript": "^5.4.2",
+    "typescript-eslint": "^7.2.0",
+    "xlsx": "file:src/modules/xlsx-0.19.3.tar"
+  }
+}

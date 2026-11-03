@@ -1442,7 +1442,8 @@ const flow = (() => {
 
     const buffer = await buildWorkbook(ordered, warnings, channels);
     const filename = fileName(`aktarim-${aktarim.no}`);
-    return { orderCount: exported.length, aktarim: { no: aktarim.no, zaman: aktarim.zaman, etiket }, buffer, filename, sheet, warnings };
+    return { orderCount: exported.length, aktarim: { no: aktarim.no, zaman: aktarim.zaman, etiket }, buffer, filename, sheet, warnings,
+      etiketler: etiketVerisi(ordered, etiket) };
   }
 
   // Aktarılanlar listesinden seçilenleri yeniden Excel olarak almak (durum değiştirmez)
@@ -1452,7 +1453,25 @@ const flow = (() => {
     return { orderCount: selected.length, buffer, filename: fileName(s.aktarim ? `aktarim-${s.aktarim.no}` : 'liste') };
   }
 
-  return { list, exportExcel, download, aktarimListesi };
+  // Label LIVE etiketi (GENELBARKOD_GUNCEL tasarımı): değişken adları tasarımdakiyle birebir (Türkçe harfler tasarımda atılmış)
+  function etiketVerisi(orders, etiket) {
+    return orders.map((o) => {
+      const r = excel.toRecord(o);
+      const t = (v) => (v == null ? '' : String(v));
+      return {
+        AKTARM: t(etiket), KANAL: t(r.kanal), SIPARI_NO: t(r.siparisNo), SIPARI_TARIHI: t(r.tarih), MTERI: t(r.musteri),
+        TELEFON: t(r.telefon), ADRES: t(r.adres), KARGO_FIRMAS: t(r.kargoFirmasi), KARGO_ANAHTAR: t(r.kargoAnahtari), SKU: t(r.sku),
+        ADET: t(r.adet), TUTAR: t(r.tutar), DEME: t(r.odemeTipi), DURUM: t(r.durum), ETIKETLER: t(r.etiketler),
+      };
+    });
+  }
+  // Seçilen siparişlerin etiket verisi (ekrandaki sırayla; durum değiştirmez)
+  function etiketler({ sessionId, keys }) {
+    const { s, selected } = take(sessionId, keys);
+    return { etiketler: etiketVerisi(excel.ekranSirasi(selected), s.aktarim ? aktarimEtiketi(s.aktarim) : '') };
+  }
+
+  return { list, exportExcel, download, aktarimListesi, etiketler, etiketVerisi };
 })();
 
 // ======================================================================
@@ -1574,6 +1593,7 @@ const PAGE = `<!doctype html>
     <div class="bar" id="barMain">
       <button id="fetch">Siparişleri çek</button>
       <button id="export" disabled>Excel'e aktar</button>
+      <button id="etiketBekleyen" class="ghost hide">🏷️ Etiketleri yazdır</button>
       <span class="count" id="count"></span>
       <span style="flex:1"></span>
       <label class="muted" for="sirala">Sırala</label>
@@ -1593,9 +1613,12 @@ const PAGE = `<!doctype html>
       <input type="date" id="gun" aria-label="Aktarım günü">
       <span id="batches" class="batches"></span>
       <span style="flex:1"></span>
+      <button id="etiket" class="ghost" disabled>🏷️ Etiketleri yazdır</button>
       <button id="excel" class="ghost" disabled>Excel indir</button>
       <button class="link" id="toMain">← Bekleyen siparişler</button>
     </div>
+    <div class="muted" style="font-size:12px;margin:4px 0">🏷️ Etiketler bu bilgisayardaki Label LIVE'a gider (program açık ve "Enable HTTP" işaretli olmalı) · <span id="llAyar"></span> · <button class="link" id="llDegistir">Etiket ayarları</button></div>
+    <div id="llDurum"></div>
     <div id="msg"></div>
     <div class="scroll"><table id="tablo">
       <thead><tr>
@@ -1703,10 +1726,56 @@ async function aktarimiAc(no) {
 }
 $('toMain').onclick = () => setMode('bekleyen');
 
+// ---- Label LIVE: etiketler bu Mac'teki programa (localhost:11180) sırayla gönderilir ----
+const LL_VARSAYILAN = { tasarim: 'GENELBARKOD_GUNCEL', yazici: 'System-ARGOX_OS_214_plus_PPLA_203dpi' };
+let ll = (() => { try { return { ...LL_VARSAYILAN, ...JSON.parse(localStorage.getItem('labelLive') || '{}') }; } catch { return { ...LL_VARSAYILAN }; } })();
+function llGoster() { $('llAyar').textContent = 'Tasarım: ' + ll.tasarim + ' · Yazıcı: ' + ll.yazici.replace(/^System-/, '').replace(/_/g, ' '); }
+$('llDegistir').onclick = () => {
+  const t = prompt('Label LIVE tasarım adı:', ll.tasarim); if (t == null) return;
+  const y = prompt('Yazıcı (Label LIVE › Integrate › HTTP POST adresindeki printer= değeri):', ll.yazici); if (y == null) return;
+  ll = { tasarim: t.trim() || LL_VARSAYILAN.tasarim, yazici: y.trim() || LL_VARSAYILAN.yazici };
+  try { localStorage.setItem('labelLive', JSON.stringify(ll)); } catch {}
+  llGoster();
+};
+llGoster();
+let sonEtiketler = null, yaziliyor = false;
+const bekle = (ms) => new Promise((r) => setTimeout(r, ms));
+async function etiketYazdir(liste) {
+  if (yaziliyor || !liste || !liste.length) return;
+  yaziliyor = true;
+  const durum = $('llDurum'), hatali = [];
+  let basilan = 0;
+  try {
+    for (let i = 0; i < liste.length; i++) {
+      const v = liste[i];
+      durum.innerHTML = '<span class="muted">🏷️ ' + (i + 1) + '/' + liste.length + ' gönderiliyor… (' + esc(v.SIPARI_NO) + ')</span>';
+      const url = 'http://localhost:11180/api/v1/print?design=' + encodeURIComponent(ll.tasarim) + '&variables=' + encodeURIComponent(JSON.stringify(v)) +
+        '&printer=' + encodeURIComponent(ll.yazici) + '&window=show&copies=1';
+      try {
+        // Label LIVE cevabı tarayıcıya okutmuyor (CORS); istek gidince yazdırılır. Bağlantı yoksa hata verir.
+        await fetch(url, { method: 'POST', mode: 'no-cors' });
+        basilan++;
+      } catch (e) {
+        if (i === 0) { durum.innerHTML = warnHtml(["Label LIVE'a ulaşılamadı. Program açık mı, Ayarlar › Integrations › Enable HTTP işaretli mi? Panelin bu Mac'te Chrome'da açık olması gerekir; Chrome izin sorarsa İzin ver deyin."]); return; }
+        hatali.push(v.SIPARI_NO);
+      }
+      await bekle(400);   // sıra bozulmasın
+    }
+    durum.innerHTML = '<span class="ok">🏷️ ' + basilan + ' etiket Label LIVE\\'a gönderildi.</span>' +
+      (hatali.length ? warnHtml(['Gönderilemeyen: ' + hatali.join(', ') + ' — bunları seçip tekrar yazdırın.']) : '');
+  } finally { yaziliyor = false; }
+}
+$('etiketBekleyen').onclick = () => etiketYazdir(sonEtiketler);
+$('etiket').onclick = async () => {
+  try { const d = await post('api/etiket', { sessionId: session, keys: selected() }); await etiketYazdir(d.etiketler); }
+  catch (e) { $('llDurum').innerHTML = warnHtml([e.message]); }
+};
+
 function selected() { return [...document.querySelectorAll('.pick:checked')].map((c) => c.value); }
 function update() {
   const n = selected().length;
-  $('export').disabled = !n; $('excel').disabled = !n;
+  $('export').disabled = !n; $('excel').disabled = !n; $('etiket').disabled = !n;
+  $('etiket').textContent = n ? '🏷️ Etiketleri yazdır (' + n + ')' : '🏷️ Etiketleri yazdır';
   $('export').textContent = n ? "Excel'e aktar (" + n + ')' : "Excel'e aktar";
   $('excel').textContent = n ? 'Excel indir (' + n + ')' : 'Excel indir';
   $('count').textContent = mode === 'bekleyen' && session ? orders.length + ' bekleyen sipariş' : '';
@@ -1776,6 +1845,10 @@ $('export').onclick = async () => {
       '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>' +
       (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
       warnHtml(d.warnings);
+    // Az önce aktarılan siparişlerin etiketleri: düğmeyle Label LIVE'a gönderilir
+    sonEtiketler = d.etiketler || null;
+    $('etiketBekleyen').classList.toggle('hide', !(sonEtiketler && sonEtiketler.length));
+    if (sonEtiketler) $('etiketBekleyen').textContent = '🏷️ Aktarım ' + d.aktarim.etiket.split(' ')[0] + ' etiketlerini yazdır (' + sonEtiketler.length + ')';
     window.location.href = d.download;
     await load(true);
   } catch (e) { $('msg').innerHTML = warnHtml([e.message]); update(); }
@@ -1794,7 +1867,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-10-29 · v15 (kanal = web / trendyol / hepsiburada)';
+const SURUM = '2026-11-03 · v16 (Label LIVE: etiketleri yazdır)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1864,7 +1937,7 @@ app.post('/api/excel-aktar', handle(exclusive(async (req) => {
   const { sessionId, keys, sirali } = req.body || {};
   const out = await flow.exportExcel({ sessionId, keys, sirali: sirali === true });
   return {
-    orderCount: out.orderCount, aktarim: out.aktarim, warnings: out.warnings,
+    orderCount: out.orderCount, aktarim: out.aktarim, warnings: out.warnings, etiketler: out.etiketler,
     sheetUrl: out.sheet && out.sheet.url, download: keep(out.buffer, out.filename),
   };
 })));
@@ -1873,6 +1946,12 @@ app.post('/api/excel', handle(async (req) => {
   const { sessionId, keys, sirali } = req.body || {};
   const out = await flow.download({ sessionId, keys, sirali: sirali === true });
   return { orderCount: out.orderCount, download: keep(out.buffer, out.filename) };
+}));
+
+// Label LIVE için etiket verisi (seçilenler, ekrandaki sırayla)
+app.post('/api/etiket', handle(async (req) => {
+  const { sessionId, keys } = req.body || {};
+  return flow.etiketler({ sessionId, keys });
 }));
 
 app.get('/api/oto-durum', (_req, res) => res.json(oto.durum));
