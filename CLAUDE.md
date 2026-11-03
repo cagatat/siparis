@@ -38,6 +38,14 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
 - Eski etiketler: `drive'a aktarıldı - otomatik` / `etiketi çıkarıldı - otomatik` aktarılmış sayılır;
   `etiket oluşturuldu - otomatik` bekleyen sayılır.
 
+- **Etiket yazdırma (v16, Label LIVE)**: "🏷️ Etiketleri yazdır" düğmesi (Excel'e aktar sonrası o aktarımın etiketleri; Önceki aktarımlar'da seçilenler).
+  Tarayıcı, aynı Mac'teki Label LIVE'a (`http://localhost:11180/api/v1/print`, POST, `mode: no-cors`; cevap okunamaz) siparişleri ekrandaki sırayla tek tek gönderir:
+  `design=GENELBARKOD_GUNCEL`, `printer=System-ARGOX_OS_214_plus_PPLA_203dpi`, `window=show`, `copies=1`, `variables` = URI-kodlu JSON.
+  Değişken adları tasarımdakiyle birebir (Türkçe harfler atılmış): AKTARM, KANAL, SIPARI_NO, SIPARI_TARIHI, MTERI, TELEFON, ADRES, KARGO_FIRMAS,
+  KARGO_ANAHTAR, SKU, ADET, TUTAR, DEME, DURUM, ETIKETLER (`flow.etiketVerisi`, değerler Sheet satırıyla aynı: `excel.toRecord`).
+  Tasarım/yazıcı "Etiket ayarları"ndan değişir (`localStorage.labelLive`). Label LIVE'da Preferences › Integrations › Enable HTTP açık olmalı.
+  Dilara panelinin çerçevesi `allow="local-network-access; …"` taşır (Chrome yerel ağ izni). Uç nokta: `POST api/etiket` (sessionId, keys).
+
 Bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiştirilmiş kalemler
 (`currentQuantity` = 0) hariç. Etiketler kolonu en sonda (bizim otomatik etiketlerimiz gizli).
 
