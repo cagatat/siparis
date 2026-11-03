@@ -1842,14 +1842,13 @@ $('export').onclick = async () => {
   try {
     const d = await post('api/excel-aktar', { sessionId: session, keys: selected(), sirali: true });
     $('msg').innerHTML = '<span class="ok"><b>Aktarım ' + esc(d.aktarim.etiket) + '</b>: ' + d.orderCount + " sipariş Excel'e aktarıldı.</span>" +
-      '<br><a class="dl" href="' + d.download + '">⬇ Excel\\'i indir</a>' +
-      (d.sheetUrl ? '<a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
+      (d.sheetUrl ? '<br><a class="dl" href="' + esc(d.sheetUrl) + '" target="_blank" rel="noopener">↗ Google Sheet\\'te aç</a>' : '') +
       warnHtml(d.warnings);
     // Az önce aktarılan siparişlerin etiketleri: düğmeyle Label LIVE'a gönderilir
     sonEtiketler = d.etiketler || null;
     $('etiketBekleyen').classList.toggle('hide', !(sonEtiketler && sonEtiketler.length));
     if (sonEtiketler) $('etiketBekleyen').textContent = '🏷️ Aktarım ' + d.aktarim.etiket.split(' ')[0] + ' etiketlerini yazdır (' + sonEtiketler.length + ')';
-    window.location.href = d.download;
+    // v17: dosya inmez (kullanıcı isteği); Excel, Önceki aktarımlar › Excel indir ile alınır
     await load(true);
   } catch (e) { $('msg').innerHTML = warnHtml([e.message]); update(); }
 };
@@ -1867,7 +1866,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-11-03 · v16 (Label LIVE: etiketleri yazdır)';
+const SURUM = '2026-11-04 · v17 (Excel\'e aktar dosya indirmez)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1938,7 +1937,7 @@ app.post('/api/excel-aktar', handle(exclusive(async (req) => {
   const out = await flow.exportExcel({ sessionId, keys, sirali: sirali === true });
   return {
     orderCount: out.orderCount, aktarim: out.aktarim, warnings: out.warnings, etiketler: out.etiketler,
-    sheetUrl: out.sheet && out.sheet.url, download: keep(out.buffer, out.filename),
+    sheetUrl: out.sheet && out.sheet.url,
   };
 })));
 

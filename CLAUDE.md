@@ -13,7 +13,7 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
 
 ## Panel akışı (tek sayfa — kullanıcı 3 aşamalı sistemi istemedi, geri getirme)
 - **Siparişleri çek**: Excel'e aktarılmamış siparişleri listeler, hiçbir şeyi değiştirmez.
-- **Excel'e aktar**: seçilenler Excel'e yazılır ve indirilir. Shopify → tek etiket `excel`
+- **Excel'e aktar**: seçilenler aktarılır; **dosya indirilmez** (v17, kullanıcı isteği — Excel yalnız Önceki aktarımlar › "Excel indir" ile iner). Shopify → tek etiket `excel`
   (`SHOPIFY_ETIKET_EXCEL`); Trendyol → `Picking`; Hepsiburada → paketle; ikisi de `DATA_DIR/aktarilanlar.json`.
   Google Sheet ("Siparişler" sayfası, başlık hariç temizlenip yazılır) ayarlıysa yazılır, yoksa atlanır.
   **E-posta gönderilmez** (v13, kullanıcı isteği; Resend modülü kaldırıldı — `MAIL_TO` yalnız adres kontrolü e-postası için okunur).
@@ -43,6 +43,7 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
   `design=GENELBARKOD_GUNCEL`, `printer=System-ARGOX_OS_214_plus_PPLA_203dpi`, `window=show`, `copies=1`, `variables` = URI-kodlu JSON.
   Değişken adları tasarımdakiyle birebir (Türkçe harfler atılmış): AKTARM, KANAL, SIPARI_NO, SIPARI_TARIHI, MTERI, TELEFON, ADRES, KARGO_FIRMAS,
   KARGO_ANAHTAR, SKU, ADET, TUTAR, DEME, DURUM, ETIKETLER (`flow.etiketVerisi`, değerler Sheet satırıyla aynı: `excel.toRecord`).
+  Label LIVE'da tasarım ana ekrana **sabitlenmiş (Pin)** olmalı; değilse program "must be pinned on the Home Screen" der ve basmaz (no-cors yüzünden panel bu hatayı göremez).
   Tasarım/yazıcı "Etiket ayarları"ndan değişir (`localStorage.labelLive`). Label LIVE'da Preferences › Integrations › Enable HTTP açık olmalı.
   Dilara panelinin çerçevesi `allow="local-network-access; …"` taşır (Chrome yerel ağ izni). Uç nokta: `POST api/etiket` (sessionId, keys).
 
