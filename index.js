@@ -19,6 +19,10 @@ const config = (() => {
     dataDir: env('DATA_DIR', './data'),
     panel: { user: env('PANEL_USER'), password: env('PANEL_PASSWORD') },
     shopify: {
+      // Site (essejeffe.com) bağlıysa siparişler Shopify yerine siteden okunur. Site, Shopify'ın GraphQL biçiminde cevap verir
+      // (dilara_kopru.py, POST /api/dilara/gql); etiketler, aktarım listesi ve kargo anahtarı aynı mantıkla çalışır.
+      siteUrl: env('MAGAZA_SITE_URL').replace(/\/+$/, ''),
+      siteAnahtar: env('SITE_ANAHTAR'),
       store: env('SHOPIFY_STORE').replace('.myshopify.com', ''),
       clientId: env('SHOPIFY_CLIENT_ID'),
       clientSecret: env('SHOPIFY_CLIENT_SECRET'),
@@ -151,6 +155,19 @@ const shopify = (() => {
   }
 
   async function gql(query, variables) {
+    if (cfg.siteUrl) {
+      const data = await httpJson(
+        `${cfg.siteUrl}/api/dilara/gql`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-site-anahtar': cfg.siteAnahtar },
+          body: JSON.stringify({ query, variables }),
+        },
+        'Site'
+      );
+      if (data.errors) throw new Error('Site: ' + JSON.stringify(data.errors).slice(0, 300));
+      return data.data;
+    }
     const token = await getToken();
     const data = await httpJson(
       `https://${cfg.store}.myshopify.com/admin/api/${cfg.apiVersion}/graphql.json`,
@@ -200,6 +217,10 @@ const shopify = (() => {
   };
 
   function checkConfig() {
+    if (cfg.siteUrl) {
+      if (!cfg.siteAnahtar) throw new Error('Site bilgileri eksik (MAGAZA_SITE_URL + SITE_ANAHTAR)');
+      return;
+    }
     if (!cfg.store || !(cfg.accessToken || (cfg.clientId && cfg.clientSecret))) {
       throw new Error('Shopify bilgileri eksik (SHOPIFY_STORE + CLIENT_ID/SECRET)');
     }
@@ -1866,7 +1887,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-11-04 · v17 (Excel\'e aktar dosya indirmez)';
+const SURUM = '2026-11-18 · v18 (siparişler siteden: essejeffe.com)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
