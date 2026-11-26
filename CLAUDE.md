@@ -8,7 +8,7 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
 - Diğer dosyalar: `package.json`, `README.md`, `.env.example`, `.gitignore`.
 - `index.js` içindeki bölümler (her biri bir IIFE): Ayarlar (config) · Yardımcılar (util) · Shopify ·
   Trendyol · Hepsiburada · Kayıt (store) · Adres kontrolü (adres) · Excel · Google Sheets ·
-  E-posta (Resend) · Sipariş akışı (flow) · Otomatik adres kontrolü (oto) · Panel sayfası (PAGE) · Sunucu.
+  E-posta (Resend) · Sipariş akışı (flow) · Otomatik adres kontrolü (oto) · Etiket yazıcısı yardımcısı (yazici) · Panel sayfası (PAGE) · Sunucu.
 - Her değişiklikte `SURUM` sabitini artır (panel başlığında görünür, dağıtımı doğrulamak için kullanılıyor).
 
 ## Panel akışı (tek sayfa — kullanıcı 3 aşamalı sistemi istemedi, geri getirme)
@@ -48,6 +48,16 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
   kopya sayısıyla basılır. Şablonlarda `cqw` = etiket genişliğinin %1'i (`.sayfa` container). Ayarlar uygulamanın gizli alanında
   (`esse_siparis.etiket`, json; site köprüsü üzerinden); okunamaz/yazılamazsa `DATA_DIR/etiket-ayar.json` (+ uyarı). Uçlar: `GET/POST api/etiket-ayar`, `POST api/etiket`.
   PAGE bir şablon metni: içine yazılan JS'te ters bölüleri ikile (`\\s`, `\\n`).
+- **Doğrudan yazdırma (v20, varsayılan)**: yazdırma penceresi/Mac sürücüsü yok. Her etiket istemcide 203 dpi (8 nokta/mm) siyah-beyaz resme çevrilir
+  (`etiketResmi`: gerçek boyutta gizli çerçeve + SVG foreignObject → tuval; barkodlar `data-desen` modül deseninden **tam sayı nokta genişliğinde** yeniden çizilir —
+  zbar ile okunarak doğrulandı) → PPLA: `STX IA{biçim}EJETIKET` + BMP/PCX · `STX L`, `D11`, (`Hnn` koyuluk), `1Y1100000000000EJETIKET`, `E` · `STX xAGEJETIKET`.
+  Gönderim Mac'teki **yardımcıya**: `http://127.0.0.1:9123/` (`GET durum` → kuyruk adı, `POST yazdir` gövde = base64 PPLA, 20'şer etiketlik parçalar).
+  Yardımcı = `yazici` modülündeki zsh betiği; launchd soket etkinleştirmesi (inetdCompatibility, yalnız 127.0.0.1) her bağlantıda çalıştırır, `lp -d <Argox kuyruğu> -o raw` basar.
+  Ek program gerektirmez, oturum açınca kendiliğinden hazır. Kurulum komutu panelde (Etiket ayarları › "Mac'e yardımcıyı kur", `GET api/yazici-kurulum`); dosyalar `~/.esse-etiket`,
+  `~/Library/LaunchAgents/com.essejeffe.etiket.plist`. Yardımcıya ulaşılamazsa uyarı + "Yazdırma penceresiyle yazdır" düğmesi.
+  Ayar `etiket.yazici` = { yol: dogrudan|pencere, bicim: B|b|P|p (ekranda 1–4), cevir (180°), ters (siyah/beyaz), koyuluk 0=yazıcının }.
+  **Gerçek yazıcıda henüz denenmedi**: hangi resim biçiminin doğru çıktığı "Resim testi" ile seçilecek; sonuç buraya yazılmalı.
+  Yazıcı yarıda durup iki sarı ışık yanıp sönerse: kapalıyken FEED basılı tutup açarak kalibre et.
 
 Bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiştirilmiş kalemler
 (`currentQuantity` = 0) hariç. Etiketler kolonu en sonda (bizim otomatik etiketlerimiz gizli).
