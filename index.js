@@ -329,6 +329,23 @@ const shopify = (() => {
     if (errs.length) throw new Error('aktarım kaydı yazılamadı: ' + errs.map((e) => e.message).join(', '));
   }
 
+  // Uygulamanın gizli alanında başka bir kayıt (ör. etiket ayarları): okunamazsa hata fırlatır
+  async function gizliOku(key) {
+    checkConfig();
+    const d = await gql(`{ currentAppInstallation { id metafield(namespace: "${AKTARIM_NS}", key: "${key}") { value } } }`);
+    const ai = d.currentAppInstallation;
+    let deger = null;
+    try { deger = ai.metafield?.value ? JSON.parse(ai.metafield.value) : null; } catch { deger = null; }
+    return { ownerId: ai.id, deger };
+  }
+  async function gizliYaz(key, deger) {
+    const { ownerId } = await gizliOku(key);
+    const res = await gql(`mutation($m: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $m) { userErrors { field message } } }`,
+      { m: [{ ownerId, namespace: AKTARIM_NS, key, type: 'json', value: JSON.stringify(deger) }] });
+    const errs = res.metafieldsSet.userErrors;
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(', '));
+  }
+
   // Siparişlere etiket ekler. orders: [{ key, siparisNo, rows }]
   async function addTag(orders, tag) {
     const done = [];
@@ -395,7 +412,7 @@ const shopify = (() => {
   // Excel'e aktarıldı: tek etiket
   const markExported = (orders) => addTag(orders, T.excel);
 
-  return { fetchRows, fetchByIds, markExported, fixAddresses, aktarimlariOku, aktarimlariYaz, usesStore: false };
+  return { fetchRows, fetchByIds, markExported, fixAddresses, aktarimlariOku, aktarimlariYaz, gizliOku, gizliYaz, usesStore: false };
 })();
 
 // ======================================================================
@@ -1474,17 +1491,79 @@ const flow = (() => {
     return { orderCount: selected.length, buffer, filename: fileName(s.aktarim ? `aktarim-${s.aktarim.no}` : 'liste') };
   }
 
-  // Label LIVE etiketi (GENELBARKOD_GUNCEL tasarımı): değişken adları tasarımdakiyle birebir (Türkçe harfler tasarımda atılmış)
+  // Etiket değişkenleri: şablondaki {{AD}} yerlerine yazılır; değerler Excel/Sheet satırıyla aynı (excel.toRecord)
   function etiketVerisi(orders, etiket) {
     return orders.map((o) => {
       const r = excel.toRecord(o);
       const t = (v) => (v == null ? '' : String(v));
       return {
-        AKTARM: t(etiket), KANAL: t(r.kanal), SIPARI_NO: t(r.siparisNo), SIPARI_TARIHI: t(r.tarih), MTERI: t(r.musteri),
-        TELEFON: t(r.telefon), ADRES: t(r.adres), KARGO_FIRMAS: t(r.kargoFirmasi), KARGO_ANAHTAR: t(r.kargoAnahtari), SKU: t(r.sku),
-        ADET: t(r.adet), TUTAR: t(r.tutar), DEME: t(r.odemeTipi), DURUM: t(r.durum), ETIKETLER: t(r.etiketler),
+        AKTARIM: t(etiket), KANAL: t(r.kanal), SIPARIS_NO: t(r.siparisNo), TARIH: t(r.tarih), MUSTERI: t(r.musteri),
+        TELEFON: t(r.telefon), ADRES: t(r.adres), KARGO_FIRMASI: t(r.kargoFirmasi), KARGO_ANAHTARI: t(r.kargoAnahtari), SKU: t(r.sku),
+        ADET: t(r.adet), TUTAR: t(r.tutar), ODEME: t(r.odemeTipi), DURUM: t(r.durum), ETIKETLER: t(r.etiketler),
       };
     });
+  }
+
+  // ---- Etiket ayarları: ölçü (mm), sipariş etiketi şablonu (HTML), serbest etiket (HTML) ----
+  // Uygulamanın gizli alanında (esse_siparis.etiket) tutulur; okunamazsa/yazılamazsa DATA_DIR/etiket-ayar.json.
+  // Şablonlarda "cqw" birimi etiket genişliğinin yüzdesidir: ölçü değişince düzen orantılı kalır.
+  const ETIKET_VARSAYILAN = {
+    genislik: 100, yukseklik: 100,
+    sablon: `<style>
+.e{height:100%;box-sizing:border-box;padding:5cqw 4cqw;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;font-family:"Open Sans","Segoe UI",Arial,sans-serif;color:#000}
+.site{font-weight:700;font-size:4.4cqw}
+.sku{font-weight:700;font-size:5.8cqw;line-height:1.15;margin-top:5cqw}
+.barkod{width:76cqw;height:26cqw;margin-top:6cqw}
+.no{font-family:Menlo,"DejaVu Sans Mono",monospace;font-size:4.8cqw;letter-spacing:.9cqw;line-height:1.1}
+.kargo{font-weight:700;font-size:6.2cqw;margin-top:2.5cqw;line-height:1.1}
+.kanal{font-weight:700;font-size:4.4cqw;line-height:1.1}
+.alt{font-size:3.8cqw;margin-top:3cqw;line-height:1.35}
+</style>
+<div class="e">
+  <div class="site">www.essejeffe.com</div>
+  <div class="sku">{{SKU}}</div>
+  <div class="barkod">{{BARKOD}}</div>
+  <div class="no">{{KARGO_ANAHTARI}}</div>
+  <div class="kargo">{{KARGO_FIRMASI}}</div>
+  <div class="kanal">{{KANAL}}</div>
+  <div class="alt">{{MUSTERI}}<br>{{SIPARIS_NO}}</div>
+</div>`,
+    serbest: `<style>
+.s{height:100%;box-sizing:border-box;padding:6cqw;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;font-family:"Open Sans","Segoe UI",Arial,sans-serif;color:#000;gap:3cqw}
+</style>
+<div class="s">
+  <div style="font-size:9cqw;font-weight:700">Yazınızı buraya yazın</div>
+  <div style="font-size:5cqw">ikinci satır</div>
+</div>`,
+  };
+  const etiketDosyasi = path.join(config.dataDir, 'etiket-ayar.json');
+  const ayarTemizle = (a) => {
+    const mm = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 10 && n <= 300 ? Math.round(n * 10) / 10 : d; };
+    const html = (v, d) => (typeof v === 'string' && v.length <= 50000 ? v : d);
+    const D = ETIKET_VARSAYILAN;
+    return { genislik: mm(a?.genislik, D.genislik), yukseklik: mm(a?.yukseklik, D.yukseklik),
+      sablon: html(a?.sablon, D.sablon), serbest: html(a?.serbest, D.serbest) };
+  };
+  async function etiketAyarOku() {
+    if (config.sources.includes('shopify')) {
+      try { const { deger } = await shopify.gizliOku('etiket'); if (deger) return { ayar: ayarTemizle(deger), varsayilan: ETIKET_VARSAYILAN }; }
+      catch (e) { console.error('[etiket-ayar] gizli alan okunamadı:', e.message); }
+    }
+    let dosya = null;
+    try { dosya = JSON.parse(fs.readFileSync(etiketDosyasi, 'utf8')); } catch {}
+    return { ayar: ayarTemizle(dosya || {}), varsayilan: ETIKET_VARSAYILAN };
+  }
+  async function etiketAyarYaz(a) {
+    const ayar = ayarTemizle(a);
+    if (config.sources.includes('shopify')) {
+      try { await shopify.gizliYaz('etiket', ayar); return { ayar }; }
+      catch (e) { console.error('[etiket-ayar] gizli alana yazılamadı:', e.message); }
+    }
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(etiketDosyasi, JSON.stringify(ayar));
+    return { ayar, uyari: 'Ayarlar sunucuda geçici dosyaya kaydedildi; sunucu yeniden kurulunca sıfırlanabilir.' };
   }
   // Seçilen siparişlerin etiket verisi (ekrandaki sırayla; durum değiştirmez)
   function etiketler({ sessionId, keys }) {
@@ -1492,7 +1571,7 @@ const flow = (() => {
     return { etiketler: etiketVerisi(excel.ekranSirasi(selected), s.aktarim ? aktarimEtiketi(s.aktarim) : '') };
   }
 
-  return { list, exportExcel, download, aktarimListesi, etiketler, etiketVerisi };
+  return { list, exportExcel, download, aktarimListesi, etiketler, etiketVerisi, etiketAyarOku, etiketAyarYaz };
 })();
 
 // ======================================================================
@@ -1607,6 +1686,13 @@ const PAGE = `<!doctype html>
   body.gomulu{padding:8px}
   body.gomulu h1{font-size:0;margin:0 0 6px}
   body.gomulu h1 small{font-size:11px}
+  .duzen{display:flex;gap:16px;flex-wrap:wrap;margin:8px 0}
+  .duzen-sol{flex:1 1 420px;display:flex;flex-direction:column;gap:6px}
+  .duzen-sag{flex:0 0 auto;display:flex;flex-direction:column;gap:6px}
+  textarea#sablon,textarea#serbest{min-height:340px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.45;
+    padding:10px;border:1px solid var(--line);border-radius:8px;resize:vertical;tab-size:2}
+  .onizleme{width:340px;height:340px;display:flex;align-items:center;justify-content:center;background:#e9e2dc;border-radius:10px;overflow:hidden}
+  .onizleme iframe{flex:none;border:0;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.25);border-radius:6px;transform-origin:center}
 </style></head>
 <body><div class="wrap">
   <h1>Esse Jeffe Siparişler <small>{{SURUM}}</small></h1>
@@ -1638,10 +1724,54 @@ const PAGE = `<!doctype html>
       <button id="excel" class="ghost" disabled>Excel indir</button>
       <button class="link" id="toMain">← Bekleyen siparişler</button>
     </div>
-    <div class="muted" style="font-size:12px;margin:4px 0">🏷️ Etiketler bu bilgisayardaki Label LIVE'a gider (program açık ve "Enable HTTP" işaretli olmalı) · <span id="llAyar"></span> · <button class="link" id="llDegistir">Etiket ayarları</button></div>
+    <div class="bar hide" id="barEtiket">
+      <b id="etiketBaslik">Etiket ayarları</b>
+      <span style="flex:1"></span>
+      <button class="link" id="etiketGeri">← Siparişler</button>
+    </div>
+    <div class="muted" id="etiketBilgi" style="font-size:12px;margin:4px 0">🏷️ Etiketler bu panelden doğrudan yazıcıya gider · Ölçü: <span id="olcuYazi"></span> ·
+      <button class="link" id="toAyar">Etiket ayarları</button> · <button class="link" id="toSerbest">Serbest etiket</button></div>
     <div id="llDurum"></div>
     <div id="msg"></div>
-    <div class="scroll"><table id="tablo">
+    <div id="ayarAlan" class="hide">
+      <div class="bar">
+        <label>Genişlik <input type="number" id="olcuG" min="10" max="300" step="0.5" style="width:80px"> mm</label>
+        <label>Yükseklik <input type="number" id="olcuY" min="10" max="300" step="0.5" style="width:80px"> mm</label>
+        <span class="muted" style="font-size:12px">Ölçü sipariş etiketi ve serbest etiket için ortaktır.</span>
+      </div>
+      <div class="duzen">
+        <div class="duzen-sol">
+          <label class="muted" for="sablon">Sipariş etiketi şablonu (HTML)</label>
+          <textarea id="sablon" spellcheck="false"></textarea>
+          <div class="muted" style="font-size:12px;line-height:1.6">Değişkenler: {{SKU}} {{BARKOD}} {{KARGO_ANAHTARI}} {{KARGO_FIRMASI}} {{KANAL}} {{MUSTERI}} {{SIPARIS_NO}}
+            {{TELEFON}} {{ADRES}} {{TARIH}} {{ADET}} {{TUTAR}} {{ODEME}} {{DURUM}} {{ETIKETLER}} {{AKTARIM}} ·
+            {{BARKOD:metin}} istediğiniz metnin barkodu · <b>cqw</b> = etiket genişliğinin %1'i (ölçü değişince düzen orantılı kalır)</div>
+        </div>
+        <div class="duzen-sag"><div class="muted" style="font-size:12px">Önizleme (ilk sipariş ya da örnek)</div><div class="onizleme" id="ayarOnizleme"></div></div>
+      </div>
+      <div class="bar">
+        <button id="ayarKaydet">Kaydet</button>
+        <button class="ghost" id="ayarDeneme">Deneme etiketi yazdır</button>
+        <button class="ghost" id="ayarSifirla">Varsayılan şablona dön</button>
+      </div>
+    </div>
+    <div id="serbestAlan" class="hide">
+      <div class="duzen">
+        <div class="duzen-sol">
+          <label class="muted" for="serbest">Serbest etiket (HTML) — ne yazarsanız o basılır</label>
+          <textarea id="serbest" spellcheck="false"></textarea>
+          <div class="muted" style="font-size:12px">{{BARKOD:metin}} ile barkod ekleyebilirsiniz · Ölçü "Etiket ayarları"ndan.</div>
+        </div>
+        <div class="duzen-sag"><div class="muted" style="font-size:12px">Önizleme</div><div class="onizleme" id="serbestOnizleme"></div></div>
+      </div>
+      <div class="bar">
+        <label>Kopya <input type="number" id="kopya" min="1" max="200" value="1" style="width:70px"></label>
+        <button id="serbestYazdir">🖨️ Yazdır</button>
+        <button class="ghost" id="serbestKaydet">Şablonu kaydet</button>
+        <button class="ghost" id="serbestSifirla">Boş şablona dön</button>
+      </div>
+    </div>
+    <div class="scroll" id="tabloAlan"><table id="tablo">
       <thead><tr>
         <th><input type="checkbox" id="all"></th><th class="sr" data-k="kanal">Kanal</th><th class="sr" data-k="siparisNo">Sipariş</th><th class="sr" data-k="tarih">Tarih</th><th class="sr" data-k="musteri">Müşteri</th><th>Telefon</th>
         <th>Adres</th><th class="sr" data-k="sku">SKU</th><th class="sr" data-k="tutar">Tutar</th><th class="sr" data-k="odeme">Ödeme</th><th>Kargo anahtarı</th><th class="sr" data-k="durum">Durum</th><th class="sr" data-k="etiket">Etiketler</th>
@@ -1703,13 +1833,25 @@ document.querySelectorAll('th.sr').forEach((th) => th.onclick = () => {
 });
 
 function setMode(m) {
+  const etiketMi = m === 'ayar' || m === 'serbest';
   mode = m; session = null; orders = [];
   $('barMain').classList.toggle('hide', m !== 'bekleyen');
   $('barPast').classList.toggle('hide', m !== 'aktarim');
-  $('msg').innerHTML = '';
+  $('barEtiket').classList.toggle('hide', !etiketMi);
+  $('etiketBilgi').classList.toggle('hide', etiketMi);
+  $('tabloAlan').classList.toggle('hide', etiketMi);
+  $('ayarAlan').classList.toggle('hide', m !== 'ayar');
+  $('serbestAlan').classList.toggle('hide', m !== 'serbest');
+  $('msg').innerHTML = ''; $('llDurum').innerHTML = '';
   $('rows').innerHTML = empty('');
   update();
-  if (m === 'bekleyen') load();
+  if (m === 'ayar') {
+    $('etiketBaslik').textContent = 'Etiket ayarları';
+    $('olcuG').value = etiketAyar.genislik; $('olcuY').value = etiketAyar.yukseklik; $('sablon').value = etiketAyar.sablon; ayarOnizle();
+  } else if (m === 'serbest') {
+    $('etiketBaslik').textContent = 'Serbest etiket';
+    $('serbest').value = etiketAyar.serbest; serbestOnizle();
+  } else if (m === 'bekleyen') load();
   else { if (!$('gun').value) $('gun').value = bugun(); gunuYukle(); }
 }
 $('toPast').onclick = () => setMode('aktarim');
@@ -1747,45 +1889,165 @@ async function aktarimiAc(no) {
 }
 $('toMain').onclick = () => setMode('bekleyen');
 
-// ---- Label LIVE: etiketler bu Mac'teki programa (localhost:11180) sırayla gönderilir ----
-const LL_VARSAYILAN = { tasarim: 'GENELBARKOD_GUNCEL', yazici: 'System-ARGOX_OS_214_plus_PPLA_203dpi' };
-let ll = (() => { try { return { ...LL_VARSAYILAN, ...JSON.parse(localStorage.getItem('labelLive') || '{}') }; } catch { return { ...LL_VARSAYILAN }; } })();
-function llGoster() { $('llAyar').textContent = 'Tasarım: ' + ll.tasarim + ' · Yazıcı: ' + ll.yazici.replace(/^System-/, '').replace(/_/g, ' '); }
-$('llDegistir').onclick = () => {
-  const t = prompt('Label LIVE tasarım adı:', ll.tasarim); if (t == null) return;
-  const y = prompt('Yazıcı (Label LIVE › Integrate › HTTP POST adresindeki printer= değeri):', ll.yazici); if (y == null) return;
-  ll = { tasarim: t.trim() || LL_VARSAYILAN.tasarim, yazici: y.trim() || LL_VARSAYILAN.yazici };
-  try { localStorage.setItem('labelLive', JSON.stringify(ll)); } catch {}
-  llGoster();
-};
-llGoster();
+// ---- Etiketler: panel HTML şablondan çizer, tek yazdırma penceresiyle yazıcıya gönderir (Label LIVE yok) ----
+// Code128 (B) barkod: SVG
+const C128 = ['212222','222122','222221','121223','121322','131222','122213','122312','132212','221213','221312','231212','112232','122132',
+  '122231','113222','123122','123221','223211','221132','221231','213212','223112','312131','311222','321122','321221','312212','322112',
+  '322211','212123','212321','232121','111323','131123','131321','112313','132113','132311','211313','231113','231311','112133','112331',
+  '132131','113123','113321','133121','313121','211331','231131','213113','213311','213131','311123','311321','331121','312113','312311',
+  '332111','314111','221411','431111','111224','111422','121124','121421','141122','141221','112214','112412','122114','122411','142112',
+  '142211','241211','221114','413111','241112','134111','111242','121142','121241','114212','124112','124211','411212','421112','421211',
+  '212141','214121','412121','111143','111341','131141','114113','114311','411113','411311','113141','114131','311141','411131','211412',
+  '211214','211232','2331112'];
+function barkodSvg(metin) {
+  const t = String(metin || '').replace(/[^\\x20-\\x7e]/g, '?');
+  if (!t) return '';
+  // Rakam dizileri C kümesiyle (iki rakam bir kod) yazılır: barkod kısalır, çubuklar kalınlaşır
+  const rakam = (i) => { let n = 0; while (i + n < t.length && t[i + n] >= '0' && t[i + n] <= '9') n++; return n; };
+  let kume = rakam(0) >= 4 || (rakam(0) === t.length && t.length >= 2 && t.length % 2 === 0) ? 'C' : 'B';
+  const kod = [kume === 'C' ? 105 : 104];
+  for (let i = 0; i < t.length;) {
+    if (kume === 'C') {
+      if (rakam(i) >= 2) { kod.push(Number(t.substr(i, 2))); i += 2; continue; }
+      kod.push(100); kume = 'B';
+    }
+    const n = rakam(i);
+    if (n >= 4 && (n >= 6 || i + n === t.length)) {
+      if (n % 2) { kod.push(t.charCodeAt(i) - 32); i++; }
+      kod.push(99); kume = 'C'; continue;
+    }
+    kod.push(t.charCodeAt(i) - 32); i++;
+  }
+  let top = kod[0];
+  for (let i = 1; i < kod.length; i++) top += kod[i] * i;
+  kod.push(top % 103, 106);
+  let x = 10, rect = '';   // 10 modül sessiz alan
+  for (const k of kod) {
+    const desen = C128[k];
+    for (let i = 0; i < desen.length; i++) {
+      const w = Number(desen[i]);
+      if (i % 2 === 0) rect += '<rect x="' + x + '" y="0" width="' + w + '" height="100"/>';
+      x += w;
+    }
+  }
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + (x + 10) + ' 100" preserveAspectRatio="none" shape-rendering="crispEdges"' +
+    ' style="display:block;width:100%;height:100%"><g fill="#000">' + rect + '</g></svg>';
+}
+const unesc = (s) => String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+// Şablonu bir etiketin değerleriyle doldurur
+function sablonDoldur(sablon, v) {
+  v = v || {};
+  let h = String(sablon || '').replace(/\\{\\{\\s*([A-Z_]+)\\s*\\}\\}/g, (m, ad) => {
+    if (ad === 'BARKOD') return barkodSvg(v.KARGO_ANAHTARI);
+    if (!(ad in v)) return m;
+    return esc(v[ad]).replace(/\\n/g, '<br>');
+  });
+  return h.replace(/\\{\\{\\s*BARKOD:([^}]*)\\}\\}/g, (m, metin) => barkodSvg(unesc(metin.trim())));
+}
+// Her etiket bir sayfa; sayfa boyutu = etiket ölçüsü
+function etiketBelgesi(sayfalar) {
+  const g = etiketAyar.genislik, y = etiketAyar.yukseklik;
+  return '<!doctype html><html><head><meta charset="utf-8"><style>@page{size:' + g + 'mm ' + y + 'mm;margin:0}' +
+    'html,body{margin:0;padding:0;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    '.sayfa{width:' + g + 'mm;height:' + y + 'mm;overflow:hidden;position:relative;box-sizing:border-box;container-type:size;break-after:page;page-break-after:always}' +
+    '.sayfa:last-child{break-after:auto;page-break-after:auto}</style></head><body>' +
+    sayfalar.map((x) => '<div class="sayfa">' + x + '</div>').join('') + '</body></html>';
+}
+// Gizli çerçevede yazdırma penceresini açar (Mac'te yazıcı olarak Argox seçilir; ayar bir kez hatırlanır)
+function belgeYazdir(html) {
+  return new Promise((bitti) => {
+    const f = document.createElement('iframe');
+    f.setAttribute('aria-hidden', 'true');
+    f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+    f.onload = async () => {
+      try { await f.contentDocument.fonts.ready; } catch {}
+      await new Promise((r) => setTimeout(r, 150));
+      try { f.contentWindow.focus(); f.contentWindow.print(); } finally { setTimeout(() => { f.remove(); bitti(); }, 1000); }
+    };
+    f.srcdoc = html;
+    document.body.appendChild(f);
+  });
+}
+// Önizleme: tek etiket, kutuya sığacak şekilde küçültülmüş
+function onizle(kutu, icerik) {
+  const g = etiketAyar.genislik, y = etiketAyar.yukseklik, mmPx = 96 / 25.4;
+  const olcek = Math.min(320 / (g * mmPx), 320 / (y * mmPx), 3);
+  let f = kutu.querySelector('iframe');
+  if (!f) { f = document.createElement('iframe'); f.title = 'Etiket önizleme'; kutu.appendChild(f); }
+  f.style.width = g + 'mm'; f.style.height = y + 'mm'; f.style.transform = 'scale(' + olcek + ')';
+  f.srcdoc = etiketBelgesi([icerik]);
+}
+
+let etiketAyar = { genislik: 100, yukseklik: 100, sablon: '', serbest: '' }, etiketVarsayilan = null;
+function olcuGoster() { $('olcuYazi').textContent = etiketAyar.genislik + ' × ' + etiketAyar.yukseklik + ' mm'; }
+async function etiketAyarYukle() {
+  try { const d = await call('api/etiket-ayar'); etiketAyar = d.ayar; etiketVarsayilan = d.varsayilan; olcuGoster(); }
+  catch (e) { $('llDurum').innerHTML = warnHtml(['Etiket ayarları okunamadı: ' + e.message]); }
+}
+const ORNEK = { SKU: 'K-060-YESIL-S\\nK-092-MAVI-S', KARGO_ANAHTARI: 'EJ1001599626', KARGO_FIRMASI: 'DHL eCommerce', KANAL: 'website',
+  MUSTERI: 'çiğdem bay', SIPARIS_NO: '#100159', TELEFON: '05551112233', ADRES: 'Gül Sok. No 5, Kadıköy, İstanbul', TARIH: '26.11.2026 10:00',
+  ADET: '2', TUTAR: '2798', ODEME: 'Kapıda', DURUM: 'Gönderilmedi', ETIKETLER: '', AKTARIM: '#1 · 26.11.2026 10:00' };
+let ornekVeri = ORNEK;
+
 let sonEtiketler = null, yaziliyor = false;
-const bekle = (ms) => new Promise((r) => setTimeout(r, ms));
 async function etiketYazdir(liste) {
   if (yaziliyor || !liste || !liste.length) return;
+  if (!etiketAyar.sablon) await etiketAyarYukle();
   yaziliyor = true;
-  const durum = $('llDurum'), hatali = [];
-  let basilan = 0;
   try {
-    for (let i = 0; i < liste.length; i++) {
-      const v = liste[i];
-      durum.innerHTML = '<span class="muted">🏷️ ' + (i + 1) + '/' + liste.length + ' gönderiliyor… (' + esc(v.SIPARI_NO) + ')</span>';
-      const url = 'http://localhost:11180/api/v1/print?design=' + encodeURIComponent(ll.tasarim) + '&variables=' + encodeURIComponent(JSON.stringify(v)) +
-        '&printer=' + encodeURIComponent(ll.yazici) + '&window=show&copies=1';
-      try {
-        // Label LIVE cevabı tarayıcıya okutmuyor (CORS); istek gidince yazdırılır. Bağlantı yoksa hata verir.
-        await fetch(url, { method: 'POST', mode: 'no-cors' });
-        basilan++;
-      } catch (e) {
-        if (i === 0) { durum.innerHTML = warnHtml(["Label LIVE'a ulaşılamadı. Program açık mı, Ayarlar › Integrations › Enable HTTP işaretli mi? Panelin bu Mac'te Chrome'da açık olması gerekir; Chrome izin sorarsa İzin ver deyin."]); return; }
-        hatali.push(v.SIPARI_NO);
-      }
-      await bekle(400);   // sıra bozulmasın
-    }
-    durum.innerHTML = '<span class="ok">🏷️ ' + basilan + ' etiket Label LIVE\\'a gönderildi.</span>' +
-      (hatali.length ? warnHtml(['Gönderilemeyen: ' + hatali.join(', ') + ' — bunları seçip tekrar yazdırın.']) : '');
-  } finally { yaziliyor = false; }
+    $('llDurum').innerHTML = '<span class="muted">🏷️ ' + liste.length + ' etiket hazırlanıyor… Yazdırma penceresinde yazıcı olarak Argox&#39;u seçin.</span>';
+    await belgeYazdir(etiketBelgesi(liste.map((v) => sablonDoldur(etiketAyar.sablon, v))));
+    $('llDurum').innerHTML = '<span class="ok">🏷️ ' + liste.length + ' etiket yazdırma penceresine gönderildi.</span>';
+  } catch (e) { $('llDurum').innerHTML = warnHtml(['Etiketler yazdırılamadı: ' + e.message]); }
+  finally { yaziliyor = false; }
 }
+
+// ---- Etiket ayarları / Serbest etiket ekranları ----
+function ayarOnizle() {
+  etiketAyar.genislik = Number($('olcuG').value) || etiketAyar.genislik;
+  etiketAyar.yukseklik = Number($('olcuY').value) || etiketAyar.yukseklik;
+  onizle($('ayarOnizleme'), sablonDoldur($('sablon').value, ornekVeri));
+}
+function serbestOnizle() { onizle($('serbestOnizleme'), sablonDoldur($('serbest').value, {})); }
+let onizZaman = null;
+const gecikmeli = (fn) => () => { clearTimeout(onizZaman); onizZaman = setTimeout(fn, 250); };
+$('sablon').oninput = gecikmeli(ayarOnizle);
+$('olcuG').oninput = gecikmeli(ayarOnizle); $('olcuY').oninput = gecikmeli(ayarOnizle);
+$('serbest').oninput = gecikmeli(serbestOnizle);
+// Tab tuşu metin kutusunda girinti yapsın
+for (const id of ['sablon', 'serbest']) $(id).addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return; e.preventDefault();
+  const t = e.target, b = t.selectionStart; t.setRangeText('  ', b, t.selectionEnd, 'end'); t.dispatchEvent(new Event('input'));
+});
+async function etiketKaydet(degisen, mesajYeri) {
+  try {
+    const d = await post('api/etiket-ayar', { ...etiketAyar, ...degisen });
+    etiketAyar = d.ayar; olcuGoster();
+    $('msg').innerHTML = '<span class="ok">Kaydedildi.</span>' + warnHtml(d.uyari ? [d.uyari] : []);
+  } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
+}
+$('ayarKaydet').onclick = () => etiketKaydet({ genislik: Number($('olcuG').value), yukseklik: Number($('olcuY').value), sablon: $('sablon').value });
+$('ayarSifirla').onclick = () => { if (etiketVarsayilan) { $('sablon').value = etiketVarsayilan.sablon; ayarOnizle(); } };
+$('ayarDeneme').onclick = () => { ayarOnizle(); belgeYazdir(etiketBelgesi([sablonDoldur($('sablon').value, ornekVeri)])); };
+$('serbestKaydet').onclick = () => etiketKaydet({ serbest: $('serbest').value });
+$('serbestSifirla').onclick = () => { if (etiketVarsayilan) { $('serbest').value = etiketVarsayilan.serbest; serbestOnizle(); } };
+$('serbestYazdir').onclick = () => {
+  const n = Math.min(200, Math.max(1, Number($('kopya').value) || 1));
+  const tek = sablonDoldur($('serbest').value, {});
+  belgeYazdir(etiketBelgesi(Array.from({ length: n }, () => tek)));
+};
+async function etiketEkrani(tur) {
+  await etiketAyarYukle();
+  // Önizlemede ekrandaki ilk sipariş kullanılır (varsa)
+  if (session && selected().length) {
+    try { const d = await post('api/etiket', { sessionId: session, keys: selected().slice(0, 1) }); ornekVeri = d.etiketler[0] || ORNEK; } catch { ornekVeri = ORNEK; }
+  } else ornekVeri = ORNEK;
+  setMode(tur);
+}
+$('toAyar').onclick = () => etiketEkrani('ayar');
+$('toSerbest').onclick = () => etiketEkrani('serbest');
+$('etiketGeri').onclick = () => setMode('bekleyen');
+etiketAyarYukle();
 $('etiketBekleyen').onclick = () => etiketYazdir(sonEtiketler);
 $('etiket').onclick = async () => {
   try { const d = await post('api/etiket', { sessionId: session, keys: selected() }); await etiketYazdir(d.etiketler); }
@@ -1887,7 +2149,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-11-18 · v18 (siparişler siteden: essejeffe.com)';
+const SURUM = '2026-11-26 · v19 (etiketler panelden, Label LIVE yok)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -1968,7 +2230,11 @@ app.post('/api/excel', handle(async (req) => {
   return { orderCount: out.orderCount, download: keep(out.buffer, out.filename) };
 }));
 
-// Label LIVE için etiket verisi (seçilenler, ekrandaki sırayla)
+// Etiket ayarları (ölçü + şablonlar)
+app.get('/api/etiket-ayar', handle(async () => flow.etiketAyarOku()));
+app.post('/api/etiket-ayar', handle(async (req) => flow.etiketAyarYaz(req.body || {})));
+
+// Etiket verisi (seçilenler, ekrandaki sırayla)
 app.post('/api/etiket', handle(async (req) => {
   const { sessionId, keys } = req.body || {};
   return flow.etiketler({ sessionId, keys });

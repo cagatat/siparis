@@ -38,14 +38,16 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
 - Eski etiketler: `drive'a aktarıldı - otomatik` / `etiketi çıkarıldı - otomatik` aktarılmış sayılır;
   `etiket oluşturuldu - otomatik` bekleyen sayılır.
 
-- **Etiket yazdırma (v16, Label LIVE)**: "🏷️ Etiketleri yazdır" düğmesi (Excel'e aktar sonrası o aktarımın etiketleri; Önceki aktarımlar'da seçilenler).
-  Tarayıcı, aynı Mac'teki Label LIVE'a (`http://localhost:11180/api/v1/print`, POST, `mode: no-cors`; cevap okunamaz) siparişleri ekrandaki sırayla tek tek gönderir:
-  `design=GENELBARKOD_GUNCEL`, `printer=System-ARGOX_OS_214_plus_PPLA_203dpi`, `window=show`, `copies=1`, `variables` = URI-kodlu JSON.
-  Değişken adları tasarımdakiyle birebir (Türkçe harfler atılmış): AKTARM, KANAL, SIPARI_NO, SIPARI_TARIHI, MTERI, TELEFON, ADRES, KARGO_FIRMAS,
-  KARGO_ANAHTAR, SKU, ADET, TUTAR, DEME, DURUM, ETIKETLER (`flow.etiketVerisi`, değerler Sheet satırıyla aynı: `excel.toRecord`).
-  Label LIVE'da tasarım ana ekrana **sabitlenmiş (Pin)** olmalı; değilse program "must be pinned on the Home Screen" der ve basmaz (no-cors yüzünden panel bu hatayı göremez).
-  Tasarım/yazıcı "Etiket ayarları"ndan değişir (`localStorage.labelLive`). Label LIVE'da Preferences › Integrations › Enable HTTP açık olmalı.
-  Dilara panelinin çerçevesi `allow="local-network-access; …"` taşır (Chrome yerel ağ izni). Uç nokta: `POST api/etiket` (sessionId, keys).
+- **Etiket yazdırma (v19, Label LIVE yok — kullanıcı isteği)**: "🏷️ Etiketleri yazdır" (Excel'e aktar sonrası o aktarım; Önceki aktarımlar'da seçilenler)
+  etiketleri tarayıcıda HTML şablondan çizer; her etiket bir sayfa (`@page size` = etiket ölçüsü), gizli çerçevede tek yazdırma penceresi açılır
+  (Mac'te yazıcı: ARGOX OS-214 plus). Barkod istemcide Code128 SVG (`barkodSvg`; rakam dizileri C kümesi) — python-barcode ile karşılaştırılıp çözülerek doğrulandı.
+  Değişkenler `flow.etiketVerisi` (değerler `excel.toRecord`): SKU (satır satır) · BARKOD (= KARGO_ANAHTARI'nın barkodu) · KARGO_ANAHTARI · KARGO_FIRMASI ·
+  KANAL · MUSTERI · SIPARIS_NO · TELEFON · ADRES · TARIH · ADET · TUTAR · ODEME · DURUM · ETIKETLER · AKTARIM; ayrıca `{{BARKOD:metin}}`.
+  Varsayılan şablon kullanıcının Label LIVE örneğinin kopyası (site · SKU'lar · barkod · anahtar · kargo · kanal · müşteri · sipariş no).
+  **Etiket ayarları** ekranı: genişlik/yükseklik (mm) + sipariş şablonu (HTML) + önizleme + deneme yazdır. **Serbest etiket** ekranı: kullanıcının yazdığı HTML,
+  kopya sayısıyla basılır. Şablonlarda `cqw` = etiket genişliğinin %1'i (`.sayfa` container). Ayarlar uygulamanın gizli alanında
+  (`esse_siparis.etiket`, json; site köprüsü üzerinden); okunamaz/yazılamazsa `DATA_DIR/etiket-ayar.json` (+ uyarı). Uçlar: `GET/POST api/etiket-ayar`, `POST api/etiket`.
+  PAGE bir şablon metni: içine yazılan JS'te ters bölüleri ikile (`\\s`, `\\n`).
 
 Bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiştirilmiş kalemler
 (`currentQuantity` = 0) hariç. Etiketler kolonu en sonda (bizim otomatik etiketlerimiz gizli).
