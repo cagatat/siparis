@@ -56,8 +56,12 @@ GitHub `main` dalına her push'ta Railway otomatik yeniden dağıtır. Arayüz v
   Ek program gerektirmez, oturum açınca kendiliğinden hazır. Kurulum komutu panelde (Etiket ayarları › "Mac'e yardımcıyı kur", `GET api/yazici-kurulum`); dosyalar `~/.esse-etiket`,
   `~/Library/LaunchAgents/com.essejeffe.etiket.plist`. Yardımcıya ulaşılamazsa uyarı + "Yazdırma penceresiyle yazdır" düğmesi.
   Ayar `etiket.yazici` = { yol: dogrudan|pencere, bicim: B|b|P|p (ekranda 1–4), cevir (180°), ters (siyah/beyaz), koyuluk 0=yazıcının }.
-  **Gerçek yazıcıda henüz denenmedi**: hangi resim biçiminin doğru çıktığı "Resim testi" ile seçilecek; sonuç buraya yazılmalı.
-  Yazıcı yarıda durup iki sarı ışık yanıp sönerse: kapalıyken FEED basılı tutup açarak kalibre et.
+  Gerçek yazıcıda resim biçimi henüz teyit edilmedi ("Resim testi" ile seçilecek; sonuç buraya yazılmalı).
+  **Etiketler şeritsiz (direct thermal)**. Yazıcı şeritli moda düşünce etiketi biraz ilerletip duruyor, iki ışık sırayla yanıp sönüyordu (v20 sonrası
+  gerçek sorun buydu, PPLA `STX KI70` ile çözüldü). v21'den beri her işin başında `STX KI70` gönderiliyor (`SERITSIZ`). Sonra gerekirse kalibrasyon: kapalıyken FEED basılı tutup aç.
+- **Serbest etiket (v21)**: ekranda iki kutu var: **Barkod** (numara yazılır/okutulur → Code128 + altında numara; Enter yazı kutusuna geçer) ve
+  **Yazı** (ürün barkodu ya da düz yazı, çok satır). Şablon değişkenleri `{{BARKOD}}`/`{{KOD}}`/`{{YAZI}}`; boş parça görünmez (`:empty`).
+  HTML "Görünümü düzenle" altında duruyor. `{{YAZI` içermeyen eski kayıtlı serbest şablon sunucuda varsayılana çevriliyor.
 
 Bir satır = bir sipariş; SKU'lar alt alta; siparişten çıkarılmış/değiştirilmiş kalemler
 (`currentQuantity` = 0) hariç. Etiketler kolonu en sonda (bizim otomatik etiketlerimiz gizli).

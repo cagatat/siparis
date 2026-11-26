@@ -1531,13 +1531,20 @@ const flow = (() => {
   <div class="kanal">{{KANAL}}</div>
   <div class="alt">{{MUSTERI}}<br>{{SIPARIS_NO}}</div>
 </div>`,
+    // Serbest etiket (v21): ekranda iki kutu — Barkod (numara → Code128 + altında numara) ve Yazı (ürün barkodu ya da düz yazı).
+    // Değişkenler: {{BARKOD}} / {{KOD}} = Barkod kutusu, {{YAZI}} = Yazı kutusu. Boş kalan parça etikette görünmez (:empty).
     serbest: `<style>
-.s{height:100%;box-sizing:border-box;padding:6cqw;display:flex;flex-direction:column;align-items:center;justify-content:center;
-  text-align:center;font-family:"Open Sans","Segoe UI",Arial,sans-serif;color:#000;gap:3cqw}
+.s{height:100%;box-sizing:border-box;padding:6cqw 5cqw;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4cqw;
+  text-align:center;font-family:"Open Sans","Segoe UI",Arial,sans-serif;color:#000}
+.b{width:80cqw;height:30cqw}
+.no{font-family:Menlo,"DejaVu Sans Mono",monospace;font-size:5.5cqw;letter-spacing:.8cqw;margin-top:-2.5cqw}
+.y{font-weight:700;font-size:8cqw;line-height:1.2;overflow-wrap:anywhere}
+.b:empty,.no:empty,.y:empty{display:none}
 </style>
 <div class="s">
-  <div style="font-size:9cqw;font-weight:700">Yazınızı buraya yazın</div>
-  <div style="font-size:5cqw">ikinci satır</div>
+  <div class="b">{{BARKOD}}</div>
+  <div class="no">{{KOD}}</div>
+  <div class="y">{{YAZI}}</div>
 </div>`,
   };
   const etiketDosyasi = path.join(config.dataDir, 'etiket-ayar.json');
@@ -1548,7 +1555,9 @@ const flow = (() => {
     const y = a?.yazici || {}, DY = D.yazici;
     const koyuluk = Number(y.koyuluk);
     return { genislik: mm(a?.genislik, D.genislik), yukseklik: mm(a?.yukseklik, D.yukseklik),
-      sablon: html(a?.sablon, D.sablon), serbest: html(a?.serbest, D.serbest),
+      sablon: html(a?.sablon, D.sablon),
+      // v21'den önceki serbest şablon (kutusuz, tek HTML) yeni düzene çevrilir
+      serbest: ((h) => (h.includes('{{YAZI') ? h : D.serbest))(html(a?.serbest, D.serbest)),
       // Yazıcıya gönderme: dogrudan = PPLA (Mac yardımcısı), pencere = tarayıcının yazdırma penceresi
       yazici: { yol: ['dogrudan', 'pencere'].includes(y.yol) ? y.yol : DY.yol,
         bicim: ['B', 'b', 'P', 'p'].includes(y.bicim) ? y.bicim : DY.bicim,
@@ -1793,6 +1802,7 @@ const PAGE = `<!doctype html>
     padding:10px;border:1px solid var(--line);border-radius:8px;resize:vertical;tab-size:2}
   .yazici-kutu{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:12px;display:flex;flex-direction:column;gap:6px}
   #yKurKomut{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all}
+  .serbest-kutu{font-size:18px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;width:100%;box-sizing:border-box;font-family:inherit}
   .onizleme{width:340px;height:340px;display:flex;align-items:center;justify-content:center;background:#e9e2dc;border-radius:10px;overflow:hidden}
   .onizleme iframe{flex:none;border:0;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.25);border-radius:6px;transform-origin:center}
 </style></head>
@@ -1889,17 +1899,26 @@ const PAGE = `<!doctype html>
     <div id="serbestAlan" class="hide">
       <div class="duzen">
         <div class="duzen-sol">
-          <label class="muted" for="serbest">Serbest etiket (HTML) — ne yazarsanız o basılır</label>
-          <textarea id="serbest" spellcheck="false"></textarea>
-          <div class="muted" style="font-size:12px">{{BARKOD:metin}} ile barkod ekleyebilirsiniz · Ölçü "Etiket ayarları"ndan.</div>
+          <label class="muted" for="sKod">Barkod — numarayı yazın ya da okutun, kargo barkodu ve altında numara çıkar</label>
+          <input id="sKod" class="serbest-kutu" autocomplete="off" spellcheck="false" placeholder="ör. EJ1001599626">
+          <label class="muted" for="sYazi">Yazı — ürün barkodu ya da düz yazı yapıştırın (birden çok satır olabilir)</label>
+          <textarea id="sYazi" class="serbest-kutu" rows="4" spellcheck="false" placeholder="ör. K-060-YESIL-S"></textarea>
+          <div class="muted" style="font-size:12px">Boş bıraktığınız kutu etikette görünmez · Ölçü "Etiket ayarları"ndan.</div>
+          <details><summary class="muted">Görünümü düzenle (HTML)</summary>
+            <textarea id="serbest" spellcheck="false"></textarea>
+            <div class="muted" style="font-size:12px">{{BARKOD}} barkod · {{KOD}} barkod numarası · {{YAZI}} yazı · {{BARKOD:metin}} sabit bir metnin barkodu</div>
+            <div class="bar">
+              <button class="ghost" id="serbestKaydet">Görünümü kaydet</button>
+              <button class="ghost" id="serbestSifirla">Varsayılan görünüme dön</button>
+            </div>
+          </details>
         </div>
         <div class="duzen-sag"><div class="muted" style="font-size:12px">Önizleme</div><div class="onizleme" id="serbestOnizleme"></div></div>
       </div>
       <div class="bar">
         <label>Kopya <input type="number" id="kopya" min="1" max="200" value="1" style="width:70px"></label>
         <button id="serbestYazdir">🖨️ Yazdır</button>
-        <button class="ghost" id="serbestKaydet">Şablonu kaydet</button>
-        <button class="ghost" id="serbestSifirla">Boş şablona dön</button>
+        <button class="ghost" id="serbestTemizle">Kutuları temizle</button>
       </div>
     </div>
     <div class="scroll" id="tabloAlan"><table id="tablo">
@@ -2150,6 +2169,9 @@ async function yardimciyaGonder(bayt) {
   return d;
 }
 const metinBayt = (t) => Uint8Array.from(t, (c) => c.charCodeAt(0) & 255);
+// Etiketler şeritsiz (direct thermal): yazıcı şeritli moda geçerse etiketi biraz ilerletip durur, iki ışık yanıp söner.
+// Bu yüzden her işin başında PPLA "KI7 0" = şeritsiz bas gönderilir.
+const SERITSIZ = metinBayt('\\x02KI70\\r');
 function birlestir(parcalar) {
   let n = 0; for (const p of parcalar) n += p.length;
   const u = new Uint8Array(n); let i = 0;
@@ -2274,7 +2296,7 @@ async function dogrudanBas(sayfalar, ilerleme, y = yaziciAyar()) {
   if (!durum.kuyruk) throw new Error('Yardımcı çalışıyor ama Argox yazıcısı bulunamadı (yazıcı Mac’e bağlı ve açık mı?).');
   const onbellek = new Map();   // aynı içerik (serbest etiket kopyaları) bir kez çizilir
   for (let i = 0; i < sayfalar.length; i += 20) {   // 20'şer etiketlik parçalar halinde
-    const parca = [];
+    const parca = [SERITSIZ];
     for (let j = i; j < Math.min(i + 20, sayfalar.length); j++) {
       if (ilerleme) ilerleme(j + 1);
       if (!onbellek.has(sayfalar[j])) onbellek.set(sayfalar[j], await etiketResmi(sayfalar[j]));
@@ -2340,7 +2362,7 @@ $('yYaziTesti').onclick = async () => {
   try {
     const durum = await yardimciDurum();
     if (!durum) throw new Error("Mac'teki etiket yardımcısına ulaşılamadı.");
-    await yardimciyaGonder(metinBayt('\\x02L\\r' + 'D11\\r' + '121100000500050ESSE JEFFE TEST\\r' + 'E\\r'));
+    await yardimciyaGonder(metinBayt('\\x02KI70\\r' + '\\x02L\\r' + 'D11\\r' + '121100000500050ESSE JEFFE TEST\\r' + 'E\\r'));
     $('llDurum').innerHTML = '<span class="ok">Yazı testi gönderildi: etikette “ESSE JEFFE TEST” yazmalı.</span>';
   } catch (e) { $('llDurum').innerHTML = warnHtml([e.message]); }
 };
@@ -2368,12 +2390,17 @@ function ayarOnizle() {
   etiketAyar.yukseklik = Number($('olcuY').value) || etiketAyar.yukseklik;
   onizle($('ayarOnizleme'), sablonDoldur($('sablon').value, ornekVeri));
 }
-function serbestOnizle() { onizle($('serbestOnizleme'), sablonDoldur($('serbest').value, {})); }
+const serbestVeri = () => { const kod = $('sKod').value.trim(); return { KARGO_ANAHTARI: kod, KOD: kod, YAZI: $('sYazi').value.replace(/\\s+$/, '') }; };
+function serbestOnizle() { onizle($('serbestOnizleme'), sablonDoldur($('serbest').value, serbestVeri())); }
+// Barkod okuyucu sonunda Enter gönderir: yazı kutusuna geçilir
+$('sKod').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('sYazi').focus(); } });
+$('serbestTemizle').onclick = () => { $('sKod').value = ''; $('sYazi').value = ''; serbestOnizle(); $('sKod').focus(); };
 let onizZaman = null;
 const gecikmeli = (fn) => () => { clearTimeout(onizZaman); onizZaman = setTimeout(fn, 250); };
 $('sablon').oninput = gecikmeli(ayarOnizle);
 $('olcuG').oninput = gecikmeli(ayarOnizle); $('olcuY').oninput = gecikmeli(ayarOnizle);
 $('serbest').oninput = gecikmeli(serbestOnizle);
+$('sKod').oninput = gecikmeli(serbestOnizle); $('sYazi').oninput = gecikmeli(serbestOnizle);
 // Tab tuşu metin kutusunda girinti yapsın
 for (const id of ['sablon', 'serbest']) $(id).addEventListener('keydown', (e) => {
   if (e.key !== 'Tab') return; e.preventDefault();
@@ -2398,7 +2425,9 @@ $('serbestKaydet').onclick = () => etiketKaydet({ serbest: $('serbest').value })
 $('serbestSifirla').onclick = () => { if (etiketVarsayilan) { $('serbest').value = etiketVarsayilan.serbest; serbestOnizle(); } };
 $('serbestYazdir').onclick = () => {
   const n = Math.min(200, Math.max(1, Number($('kopya').value) || 1));
-  const tek = sablonDoldur($('serbest').value, {});
+  const v = serbestVeri();
+  if (!v.KOD && !v.YAZI) { $('llDurum').innerHTML = warnHtml(['Barkod ya da yazı kutusuna bir şey yazın.']); return; }
+  const tek = sablonDoldur($('serbest').value, v);
   etiketGonder(Array.from({ length: n }, () => tek));
 };
 async function etiketEkrani(tur) {
@@ -2514,7 +2543,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-11-26 · v20 (etiketler doğrudan Argox’a, PPLA)';
+const SURUM = '2026-11-26 · v21 (serbest etiket: barkod + yazı kutusu, şeritsiz mod)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
