@@ -1509,6 +1509,8 @@ const flow = (() => {
   // Şablonlarda "cqw" birimi etiket genişliğinin yüzdesidir: ölçü değişince düzen orantılı kalır.
   const ETIKET_VARSAYILAN = {
     genislik: 100, yukseklik: 100,
+    // bicim: PPLA resim yükleme biçimi (B/b = BMP, P/p = PCX; "Yazıcı testi" ile seçilir) · koyuluk 0 = yazıcının kendi ayarı
+    yazici: { yol: 'dogrudan', bicim: 'B', cevir: false, ters: false, koyuluk: 0 },
     sablon: `<style>
 .e{height:100%;box-sizing:border-box;padding:5cqw 4cqw;display:flex;flex-direction:column;align-items:center;justify-content:center;
   text-align:center;font-family:"Open Sans","Segoe UI",Arial,sans-serif;color:#000}
@@ -1543,8 +1545,15 @@ const flow = (() => {
     const mm = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 10 && n <= 300 ? Math.round(n * 10) / 10 : d; };
     const html = (v, d) => (typeof v === 'string' && v.length <= 50000 ? v : d);
     const D = ETIKET_VARSAYILAN;
+    const y = a?.yazici || {}, DY = D.yazici;
+    const koyuluk = Number(y.koyuluk);
     return { genislik: mm(a?.genislik, D.genislik), yukseklik: mm(a?.yukseklik, D.yukseklik),
-      sablon: html(a?.sablon, D.sablon), serbest: html(a?.serbest, D.serbest) };
+      sablon: html(a?.sablon, D.sablon), serbest: html(a?.serbest, D.serbest),
+      // Yazıcıya gönderme: dogrudan = PPLA (Mac yardımcısı), pencere = tarayıcının yazdırma penceresi
+      yazici: { yol: ['dogrudan', 'pencere'].includes(y.yol) ? y.yol : DY.yol,
+        bicim: ['B', 'b', 'P', 'p'].includes(y.bicim) ? y.bicim : DY.bicim,
+        cevir: typeof y.cevir === 'boolean' ? y.cevir : DY.cevir, ters: typeof y.ters === 'boolean' ? y.ters : DY.ters,
+        koyuluk: Number.isInteger(koyuluk) && koyuluk >= 0 && koyuluk <= 20 ? koyuluk : DY.koyuluk } };
   };
   async function etiketAyarOku() {
     if (config.sources.includes('shopify')) {
@@ -1627,6 +1636,97 @@ const oto = (() => {
 })();
 
 // ======================================================================
+// ETİKET YAZICISI YARDIMCISI (Mac) — panel etiketleri PPLA olarak 127.0.0.1:9123'e gönderir;
+// bu küçük zsh betiğini launchd her bağlantıda çalıştırır, veriyi Argox kuyruğuna ham (raw) basar.
+// Kurulum: panelde "Etiket ayarları › Mac'e yardımcıyı kur" komutu Terminal'e yapıştırılır. Ek program gerekmez.
+// ======================================================================
+const yazici = (() => {
+  const PORT = 9123, ETIKET = 'com.essejeffe.etiket';
+  const YARDIMCI = `#!/bin/zsh
+# Esse Jeffe etiket yardımcısı: launchd her bağlantı için bunu çalıştırır (girdi/çıktı = bağlantı).
+# Tarayıcıdan gelen PPLA verisini (base64) Argox kuyruğuna ham (raw) olarak gönderir.
+export LC_ALL=C PATH=/usr/bin:/bin:/usr/sbin:/sbin
+D=\${0:A:h}
+CR=$'\\r'
+yanit() {
+  printf 'HTTP/1.1 %s\\r\\nAccess-Control-Allow-Origin: *\\r\\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\\r\\nAccess-Control-Allow-Headers: Content-Type\\r\\nAccess-Control-Allow-Private-Network: true\\r\\nContent-Type: application/json\\r\\nCache-Control: no-store\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%s' "$1" \${#2} "$2"
+  exit 0
+}
+jstr() { local s=\${1//\\\\/\\\\\\\\}; s=\${s//\\"/\\\\\\"}; s=\${s//$'\\n'/ }; s=\${s//$CR/}; s=\${s//$'\\t'/ }; print -rn -- "\\"$s\\""; }
+kuyruk() {
+  local k=""
+  [[ -s $D/kuyruk ]] && k=$(<$D/kuyruk)
+  [[ -z $k ]] && k=$(lpstat -e 2>/dev/null | grep -i argox | head -1)
+  [[ -z $k ]] && k=$(lpstat -p 2>/dev/null | awk 'tolower($0) ~ /argox/ {print $2; exit}')
+  print -rn -- $k
+}
+IFS= read -r ilk || exit 0
+ilk=\${ilk%$CR}
+yontem=\${ilk%% *}; yol=\${\${ilk#* }%% *}
+uzunluk=0
+while IFS= read -r h; do
+  h=\${h%$CR}
+  [[ -z $h ]] && break
+  case \${(L)h} in content-length:*) uzunluk=\${\${h#*:}//[^0-9]/} ;; esac
+done
+[[ $yontem == OPTIONS ]] && yanit '204 No Content' ''
+case "$yontem $yol" in
+  'GET /durum')
+    k=$(kuyruk)
+    yanit '200 OK' "{\\"ok\\":true,\\"surum\\":1,\\"kuyruk\\":$(jstr $k)}" ;;
+  'POST /yazdir')
+    (( uzunluk > 0 && uzunluk < 60000000 )) || yanit '400 Bad Request' '{"ok":false,"hata":"bos istek"}'
+    k=$(kuyruk)
+    [[ -z $k ]] && yanit '500 Internal Server Error' '{"ok":false,"hata":"argox kuyrugu bulunamadi"}'
+    t=$(mktemp -d /tmp/esse-etiket.XXXXXX) || yanit '500 Internal Server Error' '{"ok":false,"hata":"gecici dosya"}'
+    head -c $uzunluk > $t/govde
+    if ! base64 -D < $t/govde > $t/etiket.prn 2>/dev/null; then base64 -d < $t/govde > $t/etiket.prn 2>/dev/null; fi
+    if [[ ! -s $t/etiket.prn ]]; then rm -rf $t; yanit '400 Bad Request' '{"ok":false,"hata":"veri cozulemedi"}'; fi
+    cikti=$(lp -d "$k" -o raw $t/etiket.prn 2>&1); s=$?
+    rm -rf $t
+    (( s == 0 )) && yanit '200 OK' "{\\"ok\\":true,\\"kuyruk\\":$(jstr $k),\\"is\\":$(jstr $cikti)}"
+    yanit '500 Internal Server Error' "{\\"ok\\":false,\\"kuyruk\\":$(jstr $k),\\"hata\\":$(jstr $cikti)}" ;;
+esac
+yanit '404 Not Found' '{"ok":false,"hata":"yok"}'
+`;
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${ETIKET}</string>
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>$D/yardimci.zsh</string></array>
+  <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>
+  <key>Sockets</key><dict><key>Dinle</key><dict>
+    <key>SockNodeName</key><string>127.0.0.1</string><key>SockServiceName</key><string>${PORT}</string>
+    <key>SockType</key><string>stream</string><key>SockFamily</key><string>IPv4</string>
+  </dict></dict>
+</dict></plist>`;
+  const kurulum = `#!/bin/zsh
+set -e
+D="$HOME/.esse-etiket"; P="$HOME/Library/LaunchAgents/${ETIKET}.plist"
+mkdir -p "$D" "$HOME/Library/LaunchAgents"
+cat > "$D/yardimci.zsh" <<'YARDIMCI_SONU'
+${YARDIMCI}YARDIMCI_SONU
+chmod 755 "$D/yardimci.zsh"
+K=$(lpstat -e 2>/dev/null | grep -i argox | head -1 || true)
+print -r -- "$K" > "$D/kuyruk"
+cat > "$P" <<PLIST_SONU
+${plist}
+PLIST_SONU
+launchctl bootout gui/$(id -u) "$P" 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) "$P"
+sleep 1
+if curl -s -m 3 http://127.0.0.1:${PORT}/durum >/dev/null; then
+  if [[ -n $K ]]; then echo "✅ Etiket yardımcısı kuruldu. Yazıcı: $K"; else echo "⚠️ Yardımcı kuruldu ama Argox yazıcısı bulunamadı (lpstat -p ile bakın)."; fi
+else echo "❌ Yardımcı başlatılamadı."; fi
+`;
+  const kaldir = `launchctl bootout gui/$(id -u)/${ETIKET} 2>/dev/null; rm -rf ~/.esse-etiket ~/Library/LaunchAgents/${ETIKET}.plist; echo "Etiket yardımcısı kaldırıldı."`;
+  // Terminal'e tek satır olarak yapıştırılır (base64: yapıştırırken bozulmaz)
+  const komutlar = () => ({ port: PORT, kaldir,
+    kur: "echo '" + Buffer.from(kurulum).toString('base64') + "' | base64 -D | zsh" });
+  return { PORT, YARDIMCI, kurulum, komutlar };
+})();
+
+// ======================================================================
 // PANEL SAYFASI
 // ======================================================================
 const PAGE = `<!doctype html>
@@ -1691,6 +1791,8 @@ const PAGE = `<!doctype html>
   .duzen-sag{flex:0 0 auto;display:flex;flex-direction:column;gap:6px}
   textarea#sablon,textarea#serbest{min-height:340px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.45;
     padding:10px;border:1px solid var(--line);border-radius:8px;resize:vertical;tab-size:2}
+  .yazici-kutu{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:12px;display:flex;flex-direction:column;gap:6px}
+  #yKurKomut{width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:11px;word-break:break-all}
   .onizleme{width:340px;height:340px;display:flex;align-items:center;justify-content:center;background:#e9e2dc;border-radius:10px;overflow:hidden}
   .onizleme iframe{flex:none;border:0;background:#fff;box-shadow:0 1px 6px rgba(0,0,0,.25);border-radius:6px;transform-origin:center}
 </style></head>
@@ -1753,6 +1855,35 @@ const PAGE = `<!doctype html>
         <button id="ayarKaydet">Kaydet</button>
         <button class="ghost" id="ayarDeneme">Deneme etiketi yazdır</button>
         <button class="ghost" id="ayarSifirla">Varsayılan şablona dön</button>
+      </div>
+      <div class="yazici-kutu">
+        <b>Yazıcıya gönderme</b>
+        <div class="bar">
+          <label><input type="radio" name="yYol" value="dogrudan"> Doğrudan Argox'a (yazdırma penceresi açılmaz)</label>
+          <label><input type="radio" name="yYol" value="pencere"> Yazdırma penceresiyle (eski yol)</label>
+        </div>
+        <div style="font-size:13px">Mac yardımcısı: <span id="yDurum"></span> <button class="link" id="yKontrol">Yeniden kontrol et</button></div>
+        <div class="bar">
+          <label>Resim biçimi <select id="yBicim"><option value="B">1</option><option value="b">2</option><option value="P">3</option><option value="p">4</option></select></label>
+          <label><input type="checkbox" id="yCevir"> Baş aşağı çıkıyorsa çevir</label>
+          <label><input type="checkbox" id="yTers"> Siyah/beyaz ters çıkıyorsa düzelt</label>
+          <label>Koyuluk <select id="yKoyu"><option value="0">Yazıcının ayarı</option></select></label>
+        </div>
+        <div class="bar">
+          <button class="ghost" id="yYaziTesti">Yazı testi</button>
+          <button class="ghost" id="yResimTesti">Resim testi (seçili biçim)</button>
+          <span class="muted" style="font-size:12px">Resim testinde numara düz ve okunur çıkıyorsa o biçimi seçip Kaydet'e basın; çıkmıyorsa sıradaki numarayı deneyin.</span>
+        </div>
+        <details id="yKurulum"><summary>Mac'e yardımcıyı kur / kaldır</summary>
+          <ol style="margin:6px 0;padding-left:20px;font-size:13px;line-height:1.6">
+            <li>Mac'te <b>Terminal</b>'i açın (⌘ + boşluk → "Terminal").</li>
+            <li>Aşağıdaki komutu kopyalayıp Terminal'e yapıştırın, Enter'a basın. "✅ Etiket yardımcısı kuruldu" yazmalı.</li>
+            <li>Bu sayfada "Yeniden kontrol et"e basın; tarayıcı izin sorarsa "İzin ver" deyin. Mac yeniden başlasa da yardımcı kendiliğinden çalışır.</li>
+          </ol>
+          <textarea id="yKurKomut" readonly rows="3"></textarea>
+          <div class="bar"><button class="ghost" id="yKopyala">Komutu kopyala</button></div>
+          <div class="muted" style="font-size:12px">Kaldırmak için Terminal'e: <code id="yKaldir"></code></div>
+        </details>
       </div>
     </div>
     <div id="serbestAlan" class="hide">
@@ -1847,7 +1978,7 @@ function setMode(m) {
   update();
   if (m === 'ayar') {
     $('etiketBaslik').textContent = 'Etiket ayarları';
-    $('olcuG').value = etiketAyar.genislik; $('olcuY').value = etiketAyar.yukseklik; $('sablon').value = etiketAyar.sablon; ayarOnizle();
+    $('olcuG').value = etiketAyar.genislik; $('olcuY').value = etiketAyar.yukseklik; $('sablon').value = etiketAyar.sablon; ayarOnizle(); yaziciFormDoldur();
   } else if (m === 'serbest') {
     $('etiketBaslik').textContent = 'Serbest etiket';
     $('serbest').value = etiketAyar.serbest; serbestOnizle();
@@ -1921,17 +2052,19 @@ function barkodSvg(metin) {
   let top = kod[0];
   for (let i = 1; i < kod.length; i++) top += kod[i] * i;
   kod.push(top % 103, 106);
-  let x = 10, rect = '';   // 10 modül sessiz alan
+  let x = 10, rect = '', moduller = '0'.repeat(10);   // 10 modül sessiz alan
   for (const k of kod) {
     const desen = C128[k];
     for (let i = 0; i < desen.length; i++) {
       const w = Number(desen[i]);
       if (i % 2 === 0) rect += '<rect x="' + x + '" y="0" width="' + w + '" height="100"/>';
+      moduller += (i % 2 === 0 ? '1' : '0').repeat(w);
       x += w;
     }
   }
+  moduller += '0'.repeat(10);
   return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + (x + 10) + ' 100" preserveAspectRatio="none" shape-rendering="crispEdges"' +
-    ' style="display:block;width:100%;height:100%"><g fill="#000">' + rect + '</g></svg>';
+    ' data-desen="' + moduller + '" style="display:block;width:100%;height:100%"><g fill="#000">' + rect + '</g></svg>';
 }
 const unesc = (s) => String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
 // Şablonu bir etiketin değerleriyle doldurur
@@ -1991,15 +2124,242 @@ let ornekVeri = ORNEK;
 
 let sonEtiketler = null, yaziliyor = false;
 async function etiketYazdir(liste) {
-  if (yaziliyor || !liste || !liste.length) return;
+  if (!liste || !liste.length) return;
   if (!etiketAyar.sablon) await etiketAyarYukle();
-  yaziliyor = true;
+  await etiketGonder(liste.map((v) => sablonDoldur(etiketAyar.sablon, v)));
+}
+
+// ---- Doğrudan yazdırma (v20): etiket 203 dpi siyah-beyaz resme çevrilir, PPLA komutlarıyla Mac'teki yardımcıya
+// (127.0.0.1:9123) gönderilir; yardımcı Argox kuyruğuna ham basar. Yazdırma penceresi/sürücü aradan çıkar.
+const YARDIMCI = 'http://127.0.0.1:9123/';
+const NOKTA_MM = 8;   // 203 dpi ≈ 8 nokta/mm
+const yaziciAyar = () => etiketAyar.yazici || { yol: 'dogrudan', bicim: 'B', cevir: false, ters: false, koyuluk: 0 };
+async function yardimciDurum() {
   try {
-    $('llDurum').innerHTML = '<span class="muted">🏷️ ' + liste.length + ' etiket hazırlanıyor… Yazdırma penceresinde yazıcı olarak Argox&#39;u seçin.</span>';
-    await belgeYazdir(etiketBelgesi(liste.map((v) => sablonDoldur(etiketAyar.sablon, v))));
-    $('llDurum').innerHTML = '<span class="ok">🏷️ ' + liste.length + ' etiket yazdırma penceresine gönderildi.</span>';
-  } catch (e) { $('llDurum').innerHTML = warnHtml(['Etiketler yazdırılamadı: ' + e.message]); }
-  finally { yaziliyor = false; }
+    const r = await fetch(YARDIMCI + 'durum', { cache: 'no-store', signal: AbortSignal.timeout(3000) });
+    return await r.json();
+  } catch { return null; }
+}
+async function yardimciyaGonder(bayt) {
+  let r;
+  try {
+    r = await fetch(YARDIMCI + 'yazdir', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: b64(bayt), signal: AbortSignal.timeout(120000) });
+  } catch { throw Object.assign(new Error("Mac'teki etiket yardımcısına ulaşılamadı."), { yardimciYok: true }); }
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.ok) throw new Error('Yazıcıya gönderilemedi: ' + (d.hata || ('hata ' + r.status)));
+  return d;
+}
+const metinBayt = (t) => Uint8Array.from(t, (c) => c.charCodeAt(0) & 255);
+function birlestir(parcalar) {
+  let n = 0; for (const p of parcalar) n += p.length;
+  const u = new Uint8Array(n); let i = 0;
+  for (const p of parcalar) { u.set(p, i); i += p.length; }
+  return u;
+}
+function b64(u) {
+  let s = '';
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+// Bir etiketi (HTML) nokta matrisine çevirir (1 = siyah). Barkodlar tam sayı nokta genişliğinde yeniden çizilir: okunur kalır.
+async function etiketResmi(icerik) {
+  const W = Math.round(etiketAyar.genislik * NOKTA_MM), H = Math.round(etiketAyar.yukseklik * NOKTA_MM);
+  const stil = 'html,body{margin:0;padding:0;background:#fff}.sayfa{width:' + W + 'px;height:' + H +
+    'px;overflow:hidden;position:relative;box-sizing:border-box;container-type:size;background:#fff;color:#000}';
+  // 1) Gerçek boyutta (1 piksel = 1 nokta) görünmez çerçevede yerleşim; barkodların yeri ölçülür
+  const f = document.createElement('iframe');
+  f.setAttribute('aria-hidden', 'true');
+  f.style.cssText = 'position:fixed;left:-20000px;top:0;width:' + W + 'px;height:' + H + 'px;border:0;visibility:hidden';
+  const yuklendi = new Promise((r) => { f.onload = r; });
+  f.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><style>' + stil + '</style></head><body><div class="sayfa">' + icerik + '</div></body></html>';
+  document.body.appendChild(f);
+  try {
+    await yuklendi;
+    const d = f.contentDocument;
+    try { await d.fonts.ready; } catch {}
+    const sayfa = d.querySelector('.sayfa'), k = sayfa.getBoundingClientRect();
+    const barkodlar = [...d.querySelectorAll('svg[data-desen]')].map((s) => {
+      const r = s.getBoundingClientRect();
+      return { x: r.left - k.left, y: r.top - k.top, w: r.width, h: r.height, desen: s.getAttribute('data-desen') };
+    });
+    // 2) Aynı yerleşim SVG (foreignObject) olarak tuvale çizilir
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '"><foreignObject x="0" y="0" width="' + W + '" height="' + H + '">' +
+      '<div xmlns="http://www.w3.org/1999/xhtml"><style>' + stil + '</style>' + new XMLSerializer().serializeToString(sayfa) + '</div></foreignObject></svg>';
+    const img = new Image();
+    await new Promise((ok, hata) => {
+      img.onload = ok; img.onerror = () => hata(new Error('Etiket resme çevrilemedi (şablonda hatalı HTML olabilir).'));
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    });
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.fillStyle = '#fff'; g.fillRect(0, 0, W, H); g.drawImage(img, 0, 0, W, H);
+    let p;
+    try { p = g.getImageData(0, 0, W, H).data; }
+    catch { throw new Error('Bu tarayıcı etiketi resme çeviremiyor; paneli Chrome ile açın ya da yazdırma penceresini kullanın.'); }
+    const nokta = new Uint8Array(W * H);
+    for (let i = 0, j = 0; i < W * H; i++, j += 4) if (p[j] * 0.299 + p[j + 1] * 0.587 + p[j + 2] * 0.114 < 150) nokta[i] = 1;
+    for (const b of barkodlar) barkodCiz(nokta, W, H, b);
+    return { W, H, nokta };
+  } finally { f.remove(); }
+}
+function barkodCiz(nokta, W, H, b) {
+  const n = (b.desen || '').length;
+  if (!n || b.w < n) return;   // yer yetmiyorsa çizildiği gibi kalır
+  const m = Math.floor(b.w / n), x0 = Math.round(b.x + (b.w - m * n) / 2);
+  const y0 = Math.max(0, Math.round(b.y)), y1 = Math.min(H, Math.round(b.y + b.h));
+  const xa = Math.max(0, Math.floor(b.x)), xb = Math.min(W, Math.ceil(b.x + b.w));
+  for (let y = y0; y < y1; y++) {
+    const s = y * W;
+    for (let x = xa; x < xb; x++) nokta[s + x] = 0;
+    for (let i = 0; i < n; i++) if (b.desen[i] === '1') {
+      for (let q = 0; q < m; q++) { const x = x0 + i * m + q; if (x >= 0 && x < W) nokta[s + x] = 1; }
+    }
+  }
+}
+// Tek renkli BMP / PCX (bit 0 = siyah; "ters" seçiliyse tersi)
+function bmp1(r, ters) {
+  const { W, H, nokta } = r, satir = Math.ceil(W / 32) * 4, veri = satir * H, bas = 62;
+  const u = new Uint8Array(bas + veri), v = new DataView(u.buffer);
+  u[0] = 0x42; u[1] = 0x4d; v.setUint32(2, bas + veri, true); v.setUint32(10, bas, true);
+  v.setUint32(14, 40, true); v.setInt32(18, W, true); v.setInt32(22, H, true); v.setUint16(26, 1, true); v.setUint16(28, 1, true);
+  v.setUint32(34, veri, true); v.setUint32(38, 7992, true); v.setUint32(42, 7992, true); v.setUint32(46, 2, true);
+  u[58] = 255; u[59] = 255; u[60] = 255;   // renk 0 = siyah, 1 = beyaz
+  for (let y = 0; y < H; y++) {
+    const o = bas + (H - 1 - y) * satir;    // BMP satırları alttan üste
+    for (let x = 0; x < satir * 8; x++) {
+      const siyah = x < W ? nokta[y * W + x] === 1 : false;
+      if (siyah === ters) u[o + (x >> 3)] |= 0x80 >> (x & 7);
+    }
+  }
+  return u;
+}
+function pcx1(r, ters) {
+  const { W, H, nokta } = r, satir = Math.ceil(W / 16) * 2;
+  const bas = new Uint8Array(128), v = new DataView(bas.buffer);
+  bas[0] = 10; bas[1] = 5; bas[2] = 1; bas[3] = 1;
+  v.setUint16(8, W - 1, true); v.setUint16(10, H - 1, true); v.setUint16(12, 203, true); v.setUint16(14, 203, true);
+  bas[19] = 255; bas[20] = 255; bas[21] = 255;   // renk 0 = siyah, 1 = beyaz
+  bas[65] = 1; v.setUint16(66, satir, true); v.setUint16(68, 1, true);
+  const cikti = [bas], s = new Uint8Array(satir);
+  for (let y = 0; y < H; y++) {
+    s.fill(0);
+    for (let x = 0; x < satir * 8; x++) {
+      const siyah = x < W ? nokta[y * W + x] === 1 : false;
+      if (siyah === ters) s[x >> 3] |= 0x80 >> (x & 7);
+    }
+    const rle = [];
+    for (let i = 0; i < satir;) {
+      let n = 1;
+      while (i + n < satir && n < 63 && s[i + n] === s[i]) n++;
+      if (n > 1 || s[i] >= 0xc0) rle.push(0xc0 | n);
+      rle.push(s[i]); i += n;
+    }
+    cikti.push(Uint8Array.from(rle));
+  }
+  return birlestir(cikti);
+}
+// Bir etiketin PPLA komutları: resmi yazıcı belleğine yükle → etikete yerleştir → bas → resmi sil
+function pplaEtiket(r, y) {
+  const ad = 'EJETIKET';
+  if (y.cevir) r = { ...r, nokta: r.nokta.slice().reverse() };
+  const resim = y.bicim === 'P' || y.bicim === 'p' ? pcx1(r, y.ters) : bmp1(r, y.ters);
+  return [metinBayt('\\x02IA' + y.bicim + ad + '\\r'), resim,
+    metinBayt('\\x02L\\r' + 'D11\\r' + (y.koyuluk ? 'H' + String(y.koyuluk).padStart(2, '0') + '\\r' : '') +
+      '1Y1100000000000' + ad + '\\r' + 'E\\r' + '\\x02xAG' + ad + '\\r')];
+}
+async function dogrudanBas(sayfalar, ilerleme, y = yaziciAyar()) {
+  const durum = await yardimciDurum();
+  if (!durum) throw Object.assign(new Error("Mac'teki etiket yardımcısına ulaşılamadı."), { yardimciYok: true });
+  if (!durum.kuyruk) throw new Error('Yardımcı çalışıyor ama Argox yazıcısı bulunamadı (yazıcı Mac’e bağlı ve açık mı?).');
+  const onbellek = new Map();   // aynı içerik (serbest etiket kopyaları) bir kez çizilir
+  for (let i = 0; i < sayfalar.length; i += 20) {   // 20'şer etiketlik parçalar halinde
+    const parca = [];
+    for (let j = i; j < Math.min(i + 20, sayfalar.length); j++) {
+      if (ilerleme) ilerleme(j + 1);
+      if (!onbellek.has(sayfalar[j])) onbellek.set(sayfalar[j], await etiketResmi(sayfalar[j]));
+      parca.push(...pplaEtiket(onbellek.get(sayfalar[j]), y));
+    }
+    await yardimciyaGonder(birlestir(parca));
+  }
+}
+// Tüm "Yazdır" düğmeleri buradan geçer: ayara göre doğrudan (PPLA) ya da yazdırma penceresi
+async function etiketGonder(sayfalar) {
+  if (yaziliyor || !sayfalar || !sayfalar.length) return;
+  yaziliyor = true;
+  const n = sayfalar.length, yaz = (h) => { $('llDurum').innerHTML = h; };
+  try {
+    if (yaziciAyar().yol === 'pencere') {
+      yaz('<span class="muted">🏷️ ' + n + ' etiket hazırlanıyor… Yazdırma penceresinde yazıcı olarak Argox&#39;u seçin.</span>');
+      await belgeYazdir(etiketBelgesi(sayfalar));
+      yaz('<span class="ok">🏷️ ' + n + ' etiket yazdırma penceresine gönderildi.</span>');
+      return;
+    }
+    await dogrudanBas(sayfalar, (i) => yaz('<span class="muted">🏷️ Etiket ' + i + ' / ' + n + ' hazırlanıyor…</span>'));
+    yaz('<span class="ok">🏷️ ' + n + ' etiket yazıcıya gönderildi.</span>');
+  } catch (e) {
+    yaz(warnHtml([e.message + (e.yardimciYok ? " Yardımcı bu Mac'e kurulu mu? (Etiket ayarları › Mac'e yardımcıyı kur) Tarayıcı izin sorduysa “İzin ver” deyin." : '')]) +
+      ' <button class="link" id="pencereyleBas">Yazdırma penceresiyle yazdır</button>');
+    $('pencereyleBas').onclick = () => belgeYazdir(etiketBelgesi(sayfalar));
+  } finally { yaziliyor = false; }
+}
+
+// ---- Etiket ayarları › Yazıcıya gönderme ----
+for (let k = 4; k <= 20; k += 2) $('yKoyu').insertAdjacentHTML('beforeend', '<option value="' + k + '">' + k + '</option>');
+function yaziciFormDoldur() {
+  const y = yaziciAyar();
+  document.querySelectorAll('input[name=yYol]').forEach((r) => { r.checked = r.value === y.yol; });
+  $('yBicim').value = y.bicim; $('yCevir').checked = y.cevir; $('yTers').checked = y.ters; $('yKoyu').value = String(y.koyuluk);
+  yaziciKontrol();
+}
+function yaziciFormOku() {
+  const yol = document.querySelector('input[name=yYol]:checked');
+  return { yol: yol ? yol.value : 'dogrudan', bicim: $('yBicim').value, cevir: $('yCevir').checked, ters: $('yTers').checked,
+    koyuluk: Number($('yKoyu').value) || 0 };
+}
+async function yaziciKontrol() {
+  $('yDurum').innerHTML = '<span class="muted">kontrol ediliyor…</span>';
+  const d = await yardimciDurum();
+  $('yDurum').innerHTML = !d ? '<span class="warn">bulunamadı — bu Mac’e kurulu değil ya da tarayıcı izin vermedi</span>'
+    : d.kuyruk ? '<span class="ok">✅ çalışıyor · yazıcı: ' + esc(d.kuyruk) + '</span>'
+    : '<span class="warn">çalışıyor ama Argox yazıcısı bulunamadı (yazıcı bağlı ve açık mı?)</span>';
+}
+$('yKontrol').onclick = yaziciKontrol;
+$('yKurulum').addEventListener('toggle', async () => {
+  if (!$('yKurulum').open || $('yKurKomut').value) return;
+  try { const d = await call('api/yazici-kurulum'); $('yKurKomut').value = d.kur; $('yKaldir').textContent = d.kaldir; }
+  catch (e) { $('yKurKomut').value = 'Komut alınamadı: ' + e.message; }
+});
+$('yKopyala').onclick = async () => {
+  try { await navigator.clipboard.writeText($('yKurKomut').value); $('yKopyala').textContent = 'Kopyalandı ✓'; }
+  catch { $('yKurKomut').select(); document.execCommand('copy'); $('yKopyala').textContent = 'Kopyalandı ✓'; }
+  setTimeout(() => { $('yKopyala').textContent = 'Komutu kopyala'; }, 2000);
+};
+// Yazı testi: resim olmadan, yazıcının kendi yazı tipiyle tek satır (yardımcı ve yazıcı bağlantısını dener)
+$('yYaziTesti').onclick = async () => {
+  try {
+    const durum = await yardimciDurum();
+    if (!durum) throw new Error("Mac'teki etiket yardımcısına ulaşılamadı.");
+    await yardimciyaGonder(metinBayt('\\x02L\\r' + 'D11\\r' + '121100000500050ESSE JEFFE TEST\\r' + 'E\\r'));
+    $('llDurum').innerHTML = '<span class="ok">Yazı testi gönderildi: etikette “ESSE JEFFE TEST” yazmalı.</span>';
+  } catch (e) { $('llDurum').innerHTML = warnHtml([e.message]); }
+};
+// Resim testi: seçili biçimle numaralı bir deneme etiketi (doğru çıkan biçim numarası seçilip kaydedilir)
+$('yResimTesti').onclick = () => {
+  const y = yaziciFormOku(), no = $('yBicim').selectedOptions[0].textContent;
+  etiketAyar.genislik = Number($('olcuG').value) || etiketAyar.genislik;
+  etiketAyar.yukseklik = Number($('olcuY').value) || etiketAyar.yukseklik;
+  const icerik = '<div style="height:100%;box-sizing:border-box;border:1.2cqw solid #000;display:flex;flex-direction:column;align-items:center;' +
+    'justify-content:center;gap:2cqw;font-family:Arial,Helvetica,sans-serif;color:#000;text-align:center">' +
+    '<div style="font-size:7cqw;font-weight:700">↑ ÜST ↑</div><div style="font-size:34cqw;font-weight:700;line-height:1">' + esc(no) + '</div>' +
+    '<div style="font-size:6cqw">çğışöü ÇĞİŞÖÜ</div><div style="width:72cqw;height:16cqw">' + barkodSvg('EJ1001599626') + '</div>' +
+    '<div style="font-size:4.5cqw">EJ1001599626</div></div>';
+  etiketGonderAyarla(y, [icerik]);
+};
+async function etiketGonderAyarla(y, sayfalar) {
+  const once = etiketAyar.yazici;
+  etiketAyar.yazici = { ...y, yol: 'dogrudan' };
+  try { await etiketGonder(sayfalar); } finally { etiketAyar.yazici = once; }
 }
 
 // ---- Etiket ayarları / Serbest etiket ekranları ----
@@ -2026,15 +2386,20 @@ async function etiketKaydet(degisen, mesajYeri) {
     $('msg').innerHTML = '<span class="ok">Kaydedildi.</span>' + warnHtml(d.uyari ? [d.uyari] : []);
   } catch (e) { $('msg').innerHTML = warnHtml([e.message]); }
 }
-$('ayarKaydet').onclick = () => etiketKaydet({ genislik: Number($('olcuG').value), yukseklik: Number($('olcuY').value), sablon: $('sablon').value });
+$('ayarKaydet').onclick = () => etiketKaydet({ genislik: Number($('olcuG').value), yukseklik: Number($('olcuY').value), sablon: $('sablon').value,
+  yazici: yaziciFormOku() });
 $('ayarSifirla').onclick = () => { if (etiketVarsayilan) { $('sablon').value = etiketVarsayilan.sablon; ayarOnizle(); } };
-$('ayarDeneme').onclick = () => { ayarOnizle(); belgeYazdir(etiketBelgesi([sablonDoldur($('sablon').value, ornekVeri)])); };
+$('ayarDeneme').onclick = async () => {
+  ayarOnizle();
+  const once = etiketAyar.yazici; etiketAyar.yazici = yaziciFormOku();   // kaydetmeden ekrandaki yazıcı seçimiyle dener
+  try { await etiketGonder([sablonDoldur($('sablon').value, ornekVeri)]); } finally { etiketAyar.yazici = once; }
+};
 $('serbestKaydet').onclick = () => etiketKaydet({ serbest: $('serbest').value });
 $('serbestSifirla').onclick = () => { if (etiketVarsayilan) { $('serbest').value = etiketVarsayilan.serbest; serbestOnizle(); } };
 $('serbestYazdir').onclick = () => {
   const n = Math.min(200, Math.max(1, Number($('kopya').value) || 1));
   const tek = sablonDoldur($('serbest').value, {});
-  belgeYazdir(etiketBelgesi(Array.from({ length: n }, () => tek)));
+  etiketGonder(Array.from({ length: n }, () => tek));
 };
 async function etiketEkrani(tur) {
   await etiketAyarYukle();
@@ -2149,7 +2514,7 @@ setMode('bekleyen');
 // ======================================================================
 // SUNUCU
 // ======================================================================
-const SURUM = '2026-11-26 · v19 (etiketler panelden, Label LIVE yok)';
+const SURUM = '2026-11-26 · v20 (etiketler doğrudan Argox’a, PPLA)';
 const app = express();
 app.get('/surum', (_req, res) => res.send(SURUM));
 
@@ -2233,6 +2598,9 @@ app.post('/api/excel', handle(async (req) => {
 // Etiket ayarları (ölçü + şablonlar)
 app.get('/api/etiket-ayar', handle(async () => flow.etiketAyarOku()));
 app.post('/api/etiket-ayar', handle(async (req) => flow.etiketAyarYaz(req.body || {})));
+
+// Mac etiket yardımcısının kurulum/kaldırma komutları
+app.get('/api/yazici-kurulum', (_req, res) => res.json(yazici.komutlar()));
 
 // Etiket verisi (seçilenler, ekrandaki sırayla)
 app.post('/api/etiket', handle(async (req) => {
